@@ -7,6 +7,7 @@ import {
   StatusBar,
   Alert,
   BackHandler,
+  AppState,
 } from 'react-native';
 import { Button, Avatar, LoadingSpinner } from './common';
 import { useCall, useCallState, useAuth, CALL_STATES } from '../context';
@@ -23,50 +24,105 @@ try {
 
 const CallScreen = ({ navigation }) => {
   const { userType } = useAuth();
-  const {
-    callData,
-    incomingCall,
-    error,
-    endCall,
-    clearError,
-  } = useCall();
-  
+  const { callData, incomingCall, error, endCall, clearError } = useCall();
+
   const { callState, isInCall, isConnecting } = useCallState();
-  
-  // Note: V2 system doesn't have toggleMute/toggleSpeaker yet - these can be added later
+
+  // Audio controls state
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeakerOn, setIsSpeakerOn] = useState(false);
-  
-  const toggleMute = () => setIsMuted(!isMuted);
-  const toggleSpeaker = () => setIsSpeakerOn(!isSpeakerOn);
 
+  // Call duration state
   const [callDuration, setCallDuration] = useState(0);
   const [showError, setShowError] = useState(false);
+
+  // Refs for cleanup
   const intervalRef = useRef(null);
   const navigationTimeoutRef = useRef(null);
+  const errorTimeoutRef = useRef(null);
   const isNavigatingRef = useRef(false);
+  const appStateRef = useRef(AppState.currentState);
+  const audioManagerInitializedRef = useRef(false);
 
-  // Reset call duration when component mounts
+  // Reset states when component mounts
   useEffect(() => {
     console.log('CallScreen mounted with state:', callState);
     setCallDuration(0);
-    
+    setIsMuted(false);
+    setIsSpeakerOn(false);
+    isNavigatingRef.current = false;
+
     return () => {
       console.log('CallScreen unmounting');
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      if (navigationTimeoutRef.current) {
-        clearTimeout(navigationTimeoutRef.current);
-      }
+      cleanupTimers();
+      cleanupAudio();
     };
+  }, []);
+
+  // Handle app state changes
+  useEffect(() => {
+    const subscription = AppState.addEventListener(
+      'change',
+      handleAppStateChange,
+    );
+
+    return () => {
+      subscription?.remove();
+    };
+  }, []);
+
+  const handleAppStateChange = useCallback(
+    nextAppState => {
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        console.log('App came to foreground during call');
+        // Re-initialize audio if needed
+        if (isInCall && InCallManager) {
+          InCallManager.setKeepScreenOn(true);
+        }
+      }
+      appStateRef.current = nextAppState;
+    },
+    [isInCall],
+  );
+
+  // Cleanup all timers
+  const cleanupTimers = useCallback(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    if (navigationTimeoutRef.current) {
+      clearTimeout(navigationTimeoutRef.current);
+      navigationTimeoutRef.current = null;
+    }
+    if (errorTimeoutRef.current) {
+      clearTimeout(errorTimeoutRef.current);
+      errorTimeoutRef.current = null;
+    }
+  }, []);
+
+  // Cleanup audio manager
+  const cleanupAudio = useCallback(() => {
+    if (InCallManager && audioManagerInitializedRef.current) {
+      try {
+        InCallManager.stop();
+        audioManagerInitializedRef.current = false;
+        console.log('CallScreen: Audio manager stopped');
+      } catch (error) {
+        console.warn('CallScreen: Error stopping audio manager:', error);
+      }
+    }
   }, []);
 
   // Get call participant info
   const getParticipantInfo = useCallback(() => {
     if (userType === 'therapist') {
       return {
-        name: incomingCall?.participantName || callData?.participantName || 'User',
+        name:
+          incomingCall?.participantName || callData?.participantName || 'User',
         emoji: '👤',
       };
     } else {
@@ -81,64 +137,76 @@ const CallScreen = ({ navigation }) => {
 
   // Handle back button
   useEffect(() => {
-    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
-      // Prevent going back during an active call
-      if (callState === CALL_STATES.CONNECTED || callState === CALL_STATES.CONNECTING) {
-        Alert.alert(
-          'End Call',
-          'Are you sure you want to end the call?',
-          [
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        // Prevent going back during an active call
+        if (
+          callState === CALL_STATES.CONNECTED ||
+          callState === CALL_STATES.CONNECTING
+        ) {
+          Alert.alert('End Call', 'Are you sure you want to end the call?', [
             { text: 'Cancel', style: 'cancel' },
             { text: 'End Call', style: 'destructive', onPress: handleEndCall },
-          ]
-        );
-        return true; // Prevent default back action
-      }
-      return false; // Allow default back action
-    });
+          ]);
+          return true; // Prevent default back action
+        }
+        return false; // Allow default back action
+      },
+    );
 
     return () => backHandler.remove();
-  }, [callState]);
+  }, [callState, handleEndCall]);
 
   // Initialize audio management
   useEffect(() => {
-    if (InCallManager && (callState === CALL_STATES.CONNECTED || callState === CALL_STATES.CONNECTING)) {
+    if (
+      InCallManager &&
+      (callState === CALL_STATES.CONNECTED ||
+        callState === CALL_STATES.CONNECTING) &&
+      !audioManagerInitializedRef.current
+    ) {
       try {
+        console.log('CallScreen: Initializing audio manager');
         InCallManager.start({ media: 'audio', auto: true, ringback: '' });
         InCallManager.setKeepScreenOn(true);
+        audioManagerInitializedRef.current = true;
       } catch (error) {
-        console.warn('Failed to initialize InCallManager:', error);
+        console.warn('CallScreen: Failed to initialize audio manager:', error);
       }
     }
 
-    return () => {
-      if (InCallManager) {
-        try {
-          InCallManager.stop();
-        } catch (error) {
-          console.warn('Error stopping InCallManager:', error);
-        }
-      }
-    };
-  }, [callState]);
+    // Cleanup audio when call ends
+    if (
+      audioManagerInitializedRef.current &&
+      (callState === CALL_STATES.IDLE ||
+        callState === CALL_STATES.ENDED ||
+        callState === CALL_STATES.FAILED ||
+        callState === CALL_STATES.REJECTED)
+    ) {
+      cleanupAudio();
+    }
+  }, [callState, cleanupAudio]);
 
   // Call duration timer
   useEffect(() => {
     console.log('CallScreen timer effect - callState:', callState);
-    
+
     // Always clear existing timer first
     if (intervalRef.current) {
       console.log('Clearing existing timer');
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
-    
+
     if (callState === CALL_STATES.CONNECTED) {
       console.log('Starting call duration timer');
+      // Reset duration when call connects
+      setCallDuration(0);
+
       intervalRef.current = setInterval(() => {
         setCallDuration(prev => {
           const newDuration = prev + 1;
-          console.log('Call duration updated:', newDuration);
           return newDuration;
         });
       }, 1000);
@@ -156,21 +224,54 @@ const CallScreen = ({ navigation }) => {
     };
   }, [callState]);
 
+  // Navigate back to appropriate dashboard
+  const navigateBack = useCallback(() => {
+    // Prevent multiple navigation calls
+    if (isNavigatingRef.current) {
+      console.log('CallScreen: Navigation already in progress, ignoring');
+      return;
+    }
+
+    isNavigatingRef.current = true;
+
+    // Cleanup before navigation
+    cleanupTimers();
+    cleanupAudio();
+
+    const targetScreen =
+      userType === 'therapist' ? 'TherapistDashboard' : 'UserDashboard';
+    console.log('CallScreen: Navigating to', targetScreen);
+
+    // Use reset to prevent navigation stack issues
+    navigation.reset({
+      index: 0,
+      routes: [{ name: targetScreen }],
+    });
+  }, [navigation, userType, cleanupTimers, cleanupAudio]);
+
   // Handle navigation based on call state
   useEffect(() => {
-    if (callState === CALL_STATES.ENDED) {
+    if (
+      callState === CALL_STATES.ENDED ||
+      callState === CALL_STATES.FAILED ||
+      callState === CALL_STATES.REJECTED
+    ) {
       // Clear any existing timeout
       if (navigationTimeoutRef.current) {
         clearTimeout(navigationTimeoutRef.current);
+        navigationTimeoutRef.current = null;
       }
 
-      // Navigate back to appropriate dashboard after a short delay
+      // Navigate back after a short delay
       navigationTimeoutRef.current = setTimeout(() => {
-        console.log('CallScreen: Navigating back due to ENDED state');
+        console.log(
+          'CallScreen: Navigating back due to call end state:',
+          callState,
+        );
         navigateBack();
-      }, 1000);
-    } else if (callState === CALL_STATES.IDLE) {
-      // For IDLE state, navigate back immediately (this shouldn't happen in CallScreen)
+      }, 1500);
+    } else if (callState === CALL_STATES.IDLE && !isNavigatingRef.current) {
+      // For IDLE state, navigate back immediately
       console.log('CallScreen: Navigating back due to IDLE state');
       navigateBack();
     }
@@ -178,6 +279,7 @@ const CallScreen = ({ navigation }) => {
     return () => {
       if (navigationTimeoutRef.current) {
         clearTimeout(navigationTimeoutRef.current);
+        navigationTimeoutRef.current = null;
       }
     };
   }, [callState, navigateBack]);
@@ -186,58 +288,82 @@ const CallScreen = ({ navigation }) => {
   useEffect(() => {
     if (error) {
       setShowError(true);
+
+      // Clear any existing error timeout
+      if (errorTimeoutRef.current) {
+        clearTimeout(errorTimeoutRef.current);
+      }
+
       // Auto-hide error after 5 seconds
-      const errorTimeout = setTimeout(() => {
+      errorTimeoutRef.current = setTimeout(() => {
         setShowError(false);
         clearError();
       }, 5000);
-
-      return () => clearTimeout(errorTimeout);
     }
-  }, [error]);
 
-  const navigateBack = useCallback(() => {
-    // Prevent multiple navigation calls
-    if (isNavigatingRef.current) {
-      console.log('CallScreen: Navigation already in progress, ignoring');
-      return;
+    return () => {
+      if (errorTimeoutRef.current) {
+        clearTimeout(errorTimeoutRef.current);
+        errorTimeoutRef.current = null;
+      }
+    };
+  }, [error, clearError]);
+
+  const handleEndCall = useCallback(async () => {
+    try {
+      console.log('CallScreen: Ending call');
+      await endCall();
+    } catch (error) {
+      console.error('CallScreen: Error ending call:', error);
     }
-    
-    isNavigatingRef.current = true;
-    const targetScreen = userType === 'therapist' ? 'TherapistDashboard' : 'UserDashboard';
-    console.log('CallScreen: Navigating to', targetScreen);
-    navigation.replace(targetScreen);
-  }, [navigation, userType]);
-
-  const handleEndCall = useCallback(() => {
-    endCall();
   }, [endCall]);
 
+  const handleToggleMute = useCallback(() => {
+    if (InCallManager && isInCall) {
+      try {
+        const newMuteState = !isMuted;
+        InCallManager.setMicrophoneMute(newMuteState);
+        setIsMuted(newMuteState);
+      } catch (error) {
+        console.error('CallScreen: Error toggling mute:', error);
+        setIsMuted(!isMuted); // Still update UI state
+      }
+    } else {
+      setIsMuted(!isMuted);
+    }
+  }, [isMuted, isInCall]);
+
   const handleToggleSpeaker = useCallback(() => {
-    if (InCallManager) {
+    if (InCallManager && isInCall) {
       try {
         const newSpeakerState = !isSpeakerOn;
         InCallManager.setSpeakerphoneOn(newSpeakerState);
-        toggleSpeaker();
+        setIsSpeakerOn(newSpeakerState);
       } catch (error) {
-        console.error('Error toggling speaker:', error);
-        toggleSpeaker(); // Still update state
+        console.error('CallScreen: Error toggling speaker:', error);
+        setIsSpeakerOn(!isSpeakerOn); // Still update UI state
       }
     } else {
-      toggleSpeaker();
+      setIsSpeakerOn(!isSpeakerOn);
     }
-  }, [isSpeakerOn, toggleSpeaker]);
+  }, [isSpeakerOn, isInCall]);
 
   const handleDismissError = useCallback(() => {
     setShowError(false);
     clearError();
+    if (errorTimeoutRef.current) {
+      clearTimeout(errorTimeoutRef.current);
+      errorTimeoutRef.current = null;
+    }
   }, [clearError]);
 
   // Format duration as MM:SS
-  const formatDuration = useCallback((seconds) => {
+  const formatDuration = useCallback(seconds => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    return `${mins.toString().padStart(2, '0')}:${secs
+      .toString()
+      .padStart(2, '0')}`;
   }, []);
 
   // Get call status info
@@ -274,13 +400,18 @@ const CallScreen = ({ navigation }) => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={theme.colors.primary} />
-      
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor={theme.colors.primary}
+      />
+
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.sessionTitle}>Therapy Session</Text>
         <View style={styles.statusContainer}>
-          <View style={[styles.statusDot, { backgroundColor: statusInfo.color }]} />
+          <View
+            style={[styles.statusDot, { backgroundColor: statusInfo.color }]}
+          />
           <Text style={[styles.statusText, { color: statusInfo.color }]}>
             {statusInfo.text}
           </Text>
@@ -295,14 +426,9 @@ const CallScreen = ({ navigation }) => {
             size="xxxxl"
             emoji={participant.emoji}
             backgroundColor={theme.colors.primaryLight}
-            style={[
-              styles.avatar,
-              isCallActive && styles.avatarActive
-            ]}
+            style={[styles.avatar, isCallActive && styles.avatarActive]}
           />
-          <Text style={styles.participantName}>
-            {participant.name}
-          </Text>
+          <Text style={styles.participantName}>{participant.name}</Text>
           {isConnecting && (
             <View style={styles.loadingContainer}>
               <LoadingSpinner size="small" color={theme.colors.primary} />
@@ -312,18 +438,16 @@ const CallScreen = ({ navigation }) => {
 
         {/* Duration Section */}
         <View style={styles.durationSection}>
-          <Text style={styles.duration}>
-            {formatDuration(callDuration)}
-          </Text>
-          {isCallActive && (
-            <Text style={styles.rateText}>6 coins/min</Text>
-          )}
+          <Text style={styles.duration}>{formatDuration(callDuration)}</Text>
+          {isCallActive && <Text style={styles.rateText}>6 coins/min</Text>}
         </View>
 
         {/* Error Display */}
         {showError && error && (
           <View style={styles.errorContainer}>
-            <Text style={styles.errorText}>{error.message || error.error || 'An error occurred'}</Text>
+            <Text style={styles.errorText}>
+              {error.message || error.error || 'An error occurred'}
+            </Text>
             <Button
               title="Dismiss"
               variant="secondary"
@@ -341,11 +465,11 @@ const CallScreen = ({ navigation }) => {
               title={isMuted ? 'Unmute' : 'Mute'}
               variant={isMuted ? 'danger' : 'secondary'}
               size="medium"
-              onPress={toggleMute}
+              onPress={handleToggleMute}
               disabled={!canControl}
               style={styles.controlButton}
             />
-            
+
             <Button
               title={isSpeakerOn ? 'Speaker' : 'Earpiece'}
               variant={isSpeakerOn ? 'primary' : 'secondary'}
@@ -362,7 +486,10 @@ const CallScreen = ({ navigation }) => {
             size="large"
             onPress={handleEndCall}
             style={styles.endCallButton}
-            disabled={callState === CALL_STATES.ENDING}
+            disabled={
+              callState === CALL_STATES.DISCONNECTING ||
+              callState === CALL_STATES.ENDED
+            }
           />
         </View>
       </View>

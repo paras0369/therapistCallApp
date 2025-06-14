@@ -1,138 +1,133 @@
 /**
- * CallStateMachine - Manages call state transitions with strict validation
- * 
- * This state machine ensures that call states can only transition in valid ways,
- * preventing race conditions and inconsistent states that cause multiple call bugs.
+ * CallStateMachine - Enhanced with better event queue management
  */
 
 // Call States - comprehensive and mutually exclusive
 export const CALL_STATES = {
   // Initial state
   IDLE: 'idle',
-  
+
   // Outgoing call states
-  INITIATING: 'initiating',     // User started a call, getting media
-  CALLING: 'calling',           // Call request sent, waiting for response
-  
-  // Incoming call states  
-  RINGING: 'ringing',           // Receiving incoming call
-  
+  INITIATING: 'initiating', // User started a call, getting media
+  CALLING: 'calling', // Call request sent, waiting for response
+
+  // Incoming call states
+  RINGING: 'ringing', // Receiving incoming call
+
   // Active call states
-  CONNECTING: 'connecting',     // Call accepted, establishing WebRTC
-  CONNECTED: 'connected',       // WebRTC connected, audio flowing
-  
+  CONNECTING: 'connecting', // Call accepted, establishing WebRTC
+  CONNECTED: 'connected', // WebRTC connected, audio flowing
+
   // Ending states
   DISCONNECTING: 'disconnecting', // Call being ended
-  ENDED: 'ended',               // Call finished, brief transition state
-  
+  ENDED: 'ended', // Call finished, brief transition state
+
   // Error states
-  FAILED: 'failed',             // Call failed to connect
-  REJECTED: 'rejected',         // Call was rejected
+  FAILED: 'failed', // Call failed to connect
+  REJECTED: 'rejected', // Call was rejected
 };
 
 // Events that can trigger state transitions
 export const CALL_EVENTS = {
   // User initiated events
   START_CALL: 'START_CALL',
-  ACCEPT_CALL: 'ACCEPT_CALL', 
+  ACCEPT_CALL: 'ACCEPT_CALL',
   REJECT_CALL: 'REJECT_CALL',
   END_CALL: 'END_CALL',
-  
+
   // System events
   CALL_REQUEST_RECEIVED: 'CALL_REQUEST_RECEIVED',
   CALL_ACCEPTED: 'CALL_ACCEPTED',
   CALL_REJECTED: 'CALL_REJECTED',
   CALL_ENDED: 'CALL_ENDED',
-  
+
   // WebRTC events
   MEDIA_ACQUIRED: 'MEDIA_ACQUIRED',
   WEBRTC_CONNECTING: 'WEBRTC_CONNECTING',
   WEBRTC_CONNECTED: 'WEBRTC_CONNECTED',
   WEBRTC_FAILED: 'WEBRTC_FAILED',
   WEBRTC_DISCONNECTED: 'WEBRTC_DISCONNECTED',
-  
+
   // Error events
   MEDIA_FAILED: 'MEDIA_FAILED',
   CONNECTION_FAILED: 'CONNECTION_FAILED',
   TIMEOUT: 'TIMEOUT',
-  
+
   // Reset events
   RESET: 'RESET',
 };
 
 // Valid state transitions - prevents invalid state changes
 const STATE_TRANSITIONS = {
-  [CALL_STATES.IDLE]: [
-    CALL_STATES.INITIATING,  // User starts call
-    CALL_STATES.RINGING,     // Incoming call received
-  ],
-  
-  [CALL_STATES.INITIATING]: [
-    CALL_STATES.CALLING,     // Media acquired, sending request
-    CALL_STATES.FAILED,      // Media acquisition failed
-    CALL_STATES.IDLE,        // User cancelled
-  ],
-  
-  [CALL_STATES.CALLING]: [
-    CALL_STATES.CONNECTING,  // Call accepted
-    CALL_STATES.REJECTED,    // Call rejected
-    CALL_STATES.FAILED,      // Call failed
-    CALL_STATES.IDLE,        // User cancelled
-  ],
-  
-  [CALL_STATES.RINGING]: [
-    CALL_STATES.CONNECTING,  // Call accepted
-    CALL_STATES.REJECTED,    // Call rejected
-    CALL_STATES.ENDED,       // Call ended by caller
-  ],
-  
-  [CALL_STATES.CONNECTING]: [
-    CALL_STATES.CONNECTED,   // WebRTC connected
-    CALL_STATES.FAILED,      // Connection failed
-    CALL_STATES.DISCONNECTING, // Call ended during connection
-  ],
-  
-  [CALL_STATES.CONNECTED]: [
-    CALL_STATES.DISCONNECTING, // Call ended by local user
-    CALL_STATES.ENDED,       // Call ended by remote party
-    CALL_STATES.FAILED,      // Connection lost
-    CALL_STATES.REJECTED,    // Call rejected after connection (edge case)
-  ],
-  
-  [CALL_STATES.DISCONNECTING]: [
-    CALL_STATES.ENDED,       // Disconnect complete
-  ],
-  
-  // Terminal states can only go to IDLE
-  [CALL_STATES.ENDED]: [CALL_STATES.IDLE],
-  [CALL_STATES.FAILED]: [CALL_STATES.IDLE],
-  [CALL_STATES.REJECTED]: [CALL_STATES.IDLE],
-};
+  [CALL_STATES.IDLE]: {
+    [CALL_EVENTS.START_CALL]: CALL_STATES.INITIATING,
+    [CALL_EVENTS.CALL_REQUEST_RECEIVED]: CALL_STATES.RINGING,
+  },
 
-// Event to state mappings
-const EVENT_STATE_MAP = {
-  [CALL_EVENTS.START_CALL]: CALL_STATES.INITIATING,
-  [CALL_EVENTS.CALL_REQUEST_RECEIVED]: CALL_STATES.RINGING,
-  [CALL_EVENTS.MEDIA_ACQUIRED]: CALL_STATES.CALLING,
-  [CALL_EVENTS.ACCEPT_CALL]: CALL_STATES.CONNECTING,
-  [CALL_EVENTS.CALL_ACCEPTED]: CALL_STATES.CONNECTING,
-  [CALL_EVENTS.WEBRTC_CONNECTING]: CALL_STATES.CONNECTING,
-  [CALL_EVENTS.WEBRTC_CONNECTED]: CALL_STATES.CONNECTED,
-  [CALL_EVENTS.END_CALL]: CALL_STATES.DISCONNECTING,
-  [CALL_EVENTS.CALL_ENDED]: CALL_STATES.ENDED,
-  [CALL_EVENTS.REJECT_CALL]: CALL_STATES.REJECTED,
-  [CALL_EVENTS.CALL_REJECTED]: CALL_STATES.REJECTED,
-  [CALL_EVENTS.WEBRTC_FAILED]: CALL_STATES.FAILED,
-  [CALL_EVENTS.CONNECTION_FAILED]: CALL_STATES.FAILED,
-  [CALL_EVENTS.MEDIA_FAILED]: CALL_STATES.FAILED,
-  [CALL_EVENTS.TIMEOUT]: CALL_STATES.FAILED,
-  [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  [CALL_STATES.INITIATING]: {
+    [CALL_EVENTS.MEDIA_ACQUIRED]: CALL_STATES.CALLING,
+    [CALL_EVENTS.MEDIA_FAILED]: CALL_STATES.FAILED,
+    [CALL_EVENTS.END_CALL]: CALL_STATES.IDLE,
+    [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
+
+  [CALL_STATES.CALLING]: {
+    [CALL_EVENTS.CALL_ACCEPTED]: CALL_STATES.CONNECTING,
+    [CALL_EVENTS.CALL_REJECTED]: CALL_STATES.REJECTED,
+    [CALL_EVENTS.CONNECTION_FAILED]: CALL_STATES.FAILED,
+    [CALL_EVENTS.TIMEOUT]: CALL_STATES.FAILED,
+    [CALL_EVENTS.END_CALL]: CALL_STATES.IDLE,
+    [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
+
+  [CALL_STATES.RINGING]: {
+    [CALL_EVENTS.ACCEPT_CALL]: CALL_STATES.CONNECTING,
+    [CALL_EVENTS.REJECT_CALL]: CALL_STATES.REJECTED,
+    [CALL_EVENTS.CALL_ENDED]: CALL_STATES.ENDED,
+    [CALL_EVENTS.TIMEOUT]: CALL_STATES.FAILED,
+    [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
+
+  [CALL_STATES.CONNECTING]: {
+    [CALL_EVENTS.WEBRTC_CONNECTED]: CALL_STATES.CONNECTED,
+    [CALL_EVENTS.WEBRTC_FAILED]: CALL_STATES.FAILED,
+    [CALL_EVENTS.CONNECTION_FAILED]: CALL_STATES.FAILED,
+    [CALL_EVENTS.TIMEOUT]: CALL_STATES.FAILED,
+    [CALL_EVENTS.END_CALL]: CALL_STATES.DISCONNECTING,
+    [CALL_EVENTS.CALL_ENDED]: CALL_STATES.ENDED,
+    [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
+
+  [CALL_STATES.CONNECTED]: {
+    [CALL_EVENTS.END_CALL]: CALL_STATES.DISCONNECTING,
+    [CALL_EVENTS.CALL_ENDED]: CALL_STATES.ENDED,
+    [CALL_EVENTS.WEBRTC_DISCONNECTED]: CALL_STATES.DISCONNECTING,
+    [CALL_EVENTS.WEBRTC_FAILED]: CALL_STATES.FAILED,
+    [CALL_EVENTS.CONNECTION_FAILED]: CALL_STATES.FAILED,
+    [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
+
+  [CALL_STATES.DISCONNECTING]: {
+    [CALL_EVENTS.CALL_ENDED]: CALL_STATES.ENDED,
+    [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
+
+  // Terminal states
+  [CALL_STATES.ENDED]: {
+    [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
+  [CALL_STATES.FAILED]: {
+    [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
+  [CALL_STATES.REJECTED]: {
+    [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
 };
 
 // States that should automatically transition to IDLE after a delay
 const AUTO_RESET_STATES = [
   CALL_STATES.ENDED,
-  CALL_STATES.FAILED, 
+  CALL_STATES.FAILED,
   CALL_STATES.REJECTED,
 ];
 
@@ -146,6 +141,27 @@ const ACTIVE_CALL_STATES = [
   CALL_STATES.DISCONNECTING,
 ];
 
+// Priority levels for events (higher number = higher priority)
+const EVENT_PRIORITY = {
+  [CALL_EVENTS.RESET]: 100,
+  [CALL_EVENTS.END_CALL]: 90,
+  [CALL_EVENTS.CALL_ENDED]: 85,
+  [CALL_EVENTS.WEBRTC_FAILED]: 80,
+  [CALL_EVENTS.CONNECTION_FAILED]: 80,
+  [CALL_EVENTS.MEDIA_FAILED]: 80,
+  [CALL_EVENTS.TIMEOUT]: 75,
+  [CALL_EVENTS.CALL_REJECTED]: 70,
+  [CALL_EVENTS.REJECT_CALL]: 65,
+  [CALL_EVENTS.WEBRTC_CONNECTED]: 60,
+  [CALL_EVENTS.WEBRTC_DISCONNECTED]: 55,
+  [CALL_EVENTS.CALL_ACCEPTED]: 50,
+  [CALL_EVENTS.ACCEPT_CALL]: 45,
+  [CALL_EVENTS.WEBRTC_CONNECTING]: 40,
+  [CALL_EVENTS.MEDIA_ACQUIRED]: 35,
+  [CALL_EVENTS.CALL_REQUEST_RECEIVED]: 30,
+  [CALL_EVENTS.START_CALL]: 20,
+};
+
 class CallStateMachine {
   constructor() {
     this.currentState = CALL_STATES.IDLE;
@@ -156,7 +172,9 @@ class CallStateMachine {
     this.autoResetTimer = null;
     this.stateHistory = [];
     this.maxHistorySize = 50;
-    
+    this.eventDedupeWindow = 500; // ms
+    this.recentEvents = new Map();
+
     // Call metadata
     this.callId = null;
     this.participantId = null;
@@ -164,7 +182,7 @@ class CallStateMachine {
     this.callType = null;
     this.startTime = null;
     this.endTime = null;
-    
+
     // Bind methods
     this.transition = this.transition.bind(this);
     this.canTransition = this.canTransition.bind(this);
@@ -199,19 +217,21 @@ class CallStateMachine {
    */
   setCallData(data) {
     if (data.callId !== undefined) this.callId = data.callId;
-    if (data.participantId !== undefined) this.participantId = data.participantId;
-    if (data.participantName !== undefined) this.participantName = data.participantName;
+    if (data.participantId !== undefined)
+      this.participantId = data.participantId;
+    if (data.participantName !== undefined)
+      this.participantName = data.participantName;
     if (data.callType !== undefined) this.callType = data.callType;
     if (data.startTime !== undefined) this.startTime = data.startTime;
     if (data.endTime !== undefined) this.endTime = data.endTime;
   }
 
   /**
-   * Check if transition is valid
+   * Check if transition is valid for an event
    */
-  canTransition(toState) {
-    const validTransitions = STATE_TRANSITIONS[this.currentState] || [];
-    return validTransitions.includes(toState);
+  canTransition(event) {
+    const transitions = STATE_TRANSITIONS[this.currentState];
+    return transitions && transitions.hasOwnProperty(event);
   }
 
   /**
@@ -229,32 +249,41 @@ class CallStateMachine {
   }
 
   /**
-   * Transition to new state with validation
+   * Transition to new state based on event
    */
-  transition(toState, metadata = {}) {
+  transition(event, metadata = {}) {
+    const transitions = STATE_TRANSITIONS[this.currentState];
+    if (!transitions || !transitions[event]) {
+      console.warn(
+        `CallStateMachine: Invalid event ${event} for state ${this.currentState}`,
+      );
+      return false;
+    }
+
+    const toState = transitions[event];
+
     if (this.currentState === toState) {
       console.log(`CallStateMachine: Already in state ${toState}`);
       return true;
     }
 
-    if (!this.canTransition(toState)) {
-      console.error(`CallStateMachine: Invalid transition from ${this.currentState} to ${toState}`);
-      return false;
-    }
-
-    console.log(`CallStateMachine: ${this.currentState} → ${toState}`, metadata);
+    console.log(
+      `CallStateMachine: ${this.currentState} → ${toState} (event: ${event})`,
+      metadata,
+    );
 
     // Store previous state
     this.previousState = this.currentState;
-    
+
     // Update state history
     this.stateHistory.push({
       from: this.currentState,
       to: toState,
+      event,
       timestamp: Date.now(),
       metadata,
     });
-    
+
     // Keep history size manageable
     if (this.stateHistory.length > this.maxHistorySize) {
       this.stateHistory.shift();
@@ -286,46 +315,105 @@ class CallStateMachine {
       case CALL_STATES.INITIATING:
         this.startTime = Date.now();
         break;
-        
+
       case CALL_STATES.CONNECTED:
         // Mark actual connection time
         if (!this.startTime) {
           this.startTime = Date.now();
         }
         break;
-        
+
       case CALL_STATES.ENDED:
       case CALL_STATES.FAILED:
       case CALL_STATES.REJECTED:
         this.endTime = Date.now();
         // Auto-reset to IDLE after delay
         this.autoResetTimer = setTimeout(() => {
-          this.transition(CALL_STATES.IDLE, { reason: 'auto_reset' });
+          this.handleEvent(CALL_EVENTS.RESET, { reason: 'auto_reset' });
         }, 1000);
         break;
-        
+
       case CALL_STATES.IDLE:
         // Clear all call metadata
         this.clearCallData();
+        // Clear event queue when returning to idle
+        this.eventQueue = [];
+        this.recentEvents.clear();
         break;
     }
+  }
+
+  /**
+   * Check if event is duplicate within time window
+   */
+  isDuplicateEvent(event, metadata) {
+    const eventKey = `${event}_${JSON.stringify(metadata)}`;
+    const lastEventTime = this.recentEvents.get(eventKey);
+    const now = Date.now();
+
+    if (lastEventTime && now - lastEventTime < this.eventDedupeWindow) {
+      console.log(`CallStateMachine: Ignoring duplicate event ${event}`);
+      return true;
+    }
+
+    this.recentEvents.set(eventKey, now);
+
+    // Clean up old entries
+    for (const [key, time] of this.recentEvents) {
+      if (now - time > this.eventDedupeWindow * 2) {
+        this.recentEvents.delete(key);
+      }
+    }
+
+    return false;
   }
 
   /**
    * Handle incoming events and transition accordingly
    */
   async handleEvent(event, metadata = {}) {
-    console.log(`CallStateMachine: Handling event ${event} in state ${this.currentState}`, metadata);
+    console.log(
+      `CallStateMachine: Handling event ${event} in state ${this.currentState}`,
+      metadata,
+    );
+
+    // Check for duplicate events
+    if (event !== CALL_EVENTS.RESET && this.isDuplicateEvent(event, metadata)) {
+      return { success: true, state: this.currentState };
+    }
 
     // Add event to queue for processing
-    return new Promise((resolve) => {
-      this.eventQueue.push({ event, metadata, resolve });
+    return new Promise(resolve => {
+      const priority = EVENT_PRIORITY[event] || 0;
+
+      // Insert event in queue based on priority
+      const eventItem = {
+        event,
+        metadata,
+        resolve,
+        priority,
+        timestamp: Date.now(),
+      };
+
+      let inserted = false;
+      for (let i = 0; i < this.eventQueue.length; i++) {
+        if (eventItem.priority > this.eventQueue[i].priority) {
+          this.eventQueue.splice(i, 0, eventItem);
+          inserted = true;
+          break;
+        }
+      }
+
+      if (!inserted) {
+        this.eventQueue.push(eventItem);
+      }
+
       this.processEventQueue();
     });
   }
 
   /**
-   * Process events in queue to prevent race conditions
+   * Process events in queue
    */
   async processEventQueue() {
     if (this.isProcessing || this.eventQueue.length === 0) {
@@ -335,8 +423,15 @@ class CallStateMachine {
     this.isProcessing = true;
 
     while (this.eventQueue.length > 0) {
-      const { event, metadata, resolve } = this.eventQueue.shift();
-      
+      const { event, metadata, resolve, timestamp } = this.eventQueue.shift();
+
+      // Skip stale events (older than 5 seconds) except RESET
+      if (event !== CALL_EVENTS.RESET && Date.now() - timestamp > 5000) {
+        console.log(`CallStateMachine: Skipping stale event ${event}`);
+        resolve({ success: false, error: 'Event expired' });
+        continue;
+      }
+
       try {
         const result = await this.processEvent(event, metadata);
         resolve(result);
@@ -359,12 +454,12 @@ class CallStateMachine {
       return { success: true };
     }
 
-    // Get target state for this event
-    const targetState = EVENT_STATE_MAP[event];
-    
-    if (!targetState) {
-      console.warn(`CallStateMachine: No target state defined for event ${event}`);
-      return { success: false, error: 'Unknown event' };
+    // Check if transition is valid
+    if (!this.canTransition(event)) {
+      console.warn(
+        `CallStateMachine: Cannot handle event ${event} in state ${this.currentState}`,
+      );
+      return { success: false, error: 'Invalid event for current state' };
     }
 
     // Handle special event logic
@@ -374,12 +469,12 @@ class CallStateMachine {
     }
 
     // Attempt transition
-    const success = this.transition(targetState, { ...metadata, event });
-    
-    return { 
-      success, 
+    const success = this.transition(event, metadata);
+
+    return {
+      success,
       state: this.currentState,
-      previousState: this.previousState 
+      previousState: this.previousState,
     };
   }
 
@@ -421,6 +516,20 @@ class CallStateMachine {
           this.setCallData({ callId: metadata.callId });
         }
         break;
+
+      case CALL_EVENTS.ACCEPT_CALL:
+        // Ensure we're in ringing state
+        if (this.currentState !== CALL_STATES.RINGING) {
+          return { success: false, error: 'No incoming call to accept' };
+        }
+        break;
+
+      case CALL_EVENTS.END_CALL:
+        // Can only end active calls
+        if (!this.isInActiveCall()) {
+          return { success: false, error: 'No active call to end' };
+        }
+        break;
     }
 
     return { success: true };
@@ -431,34 +540,41 @@ class CallStateMachine {
    */
   forceReset() {
     console.log('CallStateMachine: Force reset to IDLE');
-    
-    // Clear timer
+
+    // Clear timers
     if (this.autoResetTimer) {
       clearTimeout(this.autoResetTimer);
       this.autoResetTimer = null;
     }
-    
+
     // Clear event queue
+    this.eventQueue.forEach(item => {
+      item.resolve({ success: false, error: 'State machine reset' });
+    });
     this.eventQueue = [];
     this.isProcessing = false;
-    
+    this.recentEvents.clear();
+
     // Record the reset
     this.stateHistory.push({
       from: this.currentState,
       to: CALL_STATES.IDLE,
+      event: CALL_EVENTS.RESET,
       timestamp: Date.now(),
-      metadata: { event: 'FORCE_RESET' },
+      metadata: { forced: true },
     });
-    
+
     // Reset state
     this.previousState = this.currentState;
     this.currentState = CALL_STATES.IDLE;
-    
+
     // Clear call data
     this.clearCallData();
-    
+
     // Notify listeners
-    this.notifyListeners(CALL_STATES.IDLE, this.previousState, { forced: true });
+    this.notifyListeners(CALL_STATES.IDLE, this.previousState, {
+      forced: true,
+    });
   }
 
   /**
@@ -512,8 +628,13 @@ class CallStateMachine {
       callData: this.getCallData(),
       isProcessing: this.isProcessing,
       queueLength: this.eventQueue.length,
+      queuedEvents: this.eventQueue.map(e => ({
+        event: e.event,
+        priority: e.priority,
+      })),
       listenerCount: this.listeners.size,
       hasAutoResetTimer: !!this.autoResetTimer,
+      recentEventsCount: this.recentEvents.size,
       stateHistory: this.getStateHistory().slice(-10), // Last 10 transitions
     };
   }

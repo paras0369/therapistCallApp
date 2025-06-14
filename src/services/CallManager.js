@@ -45,6 +45,7 @@ class CallManager {
     this.isInitialized = false;
     this.currentOperation = null;
     this.operationTimeout = null;
+    this.webrtcInitTimeout = null;
     this.listeners = new Map();
 
     // Operation timeouts (in milliseconds)
@@ -330,7 +331,9 @@ class CallManager {
           throw new Error(reinitResult.error);
         }
       } else {
-        console.log('CallManager: WebRTC peer connection already exists for call acceptance');
+        console.log(
+          'CallManager: WebRTC peer connection already exists for call acceptance',
+        );
       }
 
       // Get local media
@@ -433,7 +436,10 @@ class CallManager {
       try {
         await this.webrtcService.cleanup();
       } catch (cleanupError) {
-        console.error('CallManager: Cleanup after end call failure:', cleanupError);
+        console.error(
+          'CallManager: Cleanup after end call failure:',
+          cleanupError,
+        );
       }
 
       this.emit(CALL_MANAGER_EVENTS.ERROR, {
@@ -543,21 +549,29 @@ class CallManager {
 
       // Only the caller (user) should initiate WebRTC connection
       // The receiver (therapist) should wait for the offer
-      const userType = await import('./AuthService').then(auth => auth.default.getUserType());
+      const userType = await AuthService.getUserType();
       const webrtcStatus = this.webrtcService.getStatus();
       const callData = this.stateMachine.getCallData();
-      
+
       // Only users should initiate WebRTC, and only if we haven't already started
-      if (userType === 'user' && 
-          webrtcStatus.connectionState !== 'connecting' && 
-          webrtcStatus.connectionState !== 'connected') {
-        console.log('CallManager: User side - initiating WebRTC connection for call', data.callId);
+      if (
+        userType === 'user' &&
+        webrtcStatus.connectionState !== 'connecting' &&
+        webrtcStatus.connectionState !== 'connected'
+      ) {
+        console.log(
+          'CallManager: User side - initiating WebRTC connection for call',
+          data.callId,
+        );
         // Small delay to ensure both sides are ready
-        setTimeout(() => {
+        this.webrtcInitTimeout = setTimeout(() => {
+          this.webrtcInitTimeout = null;
           this.initiateWebRTCConnection();
         }, 100);
       } else {
-        console.log('CallManager: Therapist side or WebRTC already active - waiting for offer');
+        console.log(
+          'CallManager: Therapist side or WebRTC already active - waiting for offer',
+        );
       }
     } catch (error) {
       console.error('CallManager: Error handling call accepted:', error);
@@ -601,15 +615,23 @@ class CallManager {
 
       // Check if we're already in the process of connecting
       const webrtcStatus = this.webrtcService.getStatus();
-      if (webrtcStatus.connectionState === 'connecting' || webrtcStatus.connectionState === 'connected') {
-        console.log('CallManager: WebRTC connection already in progress or established, skipping');
+      if (
+        webrtcStatus.connectionState === 'connecting' ||
+        webrtcStatus.connectionState === 'connected'
+      ) {
+        console.log(
+          'CallManager: WebRTC connection already in progress or established, skipping',
+        );
         return;
       }
 
       // Double-check we're still in a valid state for WebRTC initiation
       const currentCallState = this.stateMachine.getState();
       if (currentCallState !== CALL_STATES.CONNECTING) {
-        console.log('CallManager: Call state changed, skipping WebRTC initiation. Current state:', currentCallState);
+        console.log(
+          'CallManager: Call state changed, skipping WebRTC initiation. Current state:',
+          currentCallState,
+        );
         return;
       }
 
@@ -617,13 +639,17 @@ class CallManager {
 
       // Ensure WebRTC is properly initialized before creating offer
       if (!webrtcStatus.hasPeerConnection) {
-        console.log('CallManager: WebRTC peer connection missing, reinitializing');
+        console.log(
+          'CallManager: WebRTC peer connection missing, reinitializing',
+        );
         const reinitResult = await this.webrtcService.initialize();
         if (!reinitResult.success) {
           throw new Error(reinitResult.error);
         }
       } else {
-        console.log('CallManager: WebRTC peer connection already exists, proceeding with offer');
+        console.log(
+          'CallManager: WebRTC peer connection already exists, proceeding with offer',
+        );
       }
 
       // Create and send offer
@@ -652,7 +678,10 @@ class CallManager {
       // Verify we're in the correct state to handle offers
       const currentState = this.stateMachine.getState();
       if (currentState !== CALL_STATES.CONNECTING) {
-        console.log('CallManager: Ignoring offer - not in connecting state. Current state:', currentState);
+        console.log(
+          'CallManager: Ignoring offer - not in connecting state. Current state:',
+          currentState,
+        );
         return;
       }
 
@@ -665,7 +694,9 @@ class CallManager {
       if (answerResult.answer) {
         this.socketService.sendAnswer(data.callId, answerResult.answer);
       } else {
-        console.log('CallManager: No answer created (offer ignored due to state)');
+        console.log(
+          'CallManager: No answer created (offer ignored due to state)',
+        );
       }
     } catch (error) {
       console.error('CallManager: Error handling WebRTC offer:', error);
@@ -685,7 +716,10 @@ class CallManager {
       // Verify we're in the correct state to handle answers
       const currentState = this.stateMachine.getState();
       if (currentState !== CALL_STATES.CONNECTING) {
-        console.log('CallManager: Ignoring answer - not in connecting state. Current state:', currentState);
+        console.log(
+          'CallManager: Ignoring answer - not in connecting state. Current state:',
+          currentState,
+        );
         return;
       }
 
@@ -726,24 +760,42 @@ class CallManager {
    * Handle remote stream
    */
   handleRemoteStream(stream) {
-    console.log('CallManager: Remote stream received');
-    this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_CONNECTED);
+    try {
+      console.log('CallManager: Remote stream received');
+      this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_CONNECTED);
+    } catch (error) {
+      console.error('CallManager: Error handling remote stream:', error);
+      this.emit(CALL_MANAGER_EVENTS.ERROR, {
+        type: ERROR_TYPES.CONNECTION_FAILED,
+        message: `Failed to handle remote stream: ${error.message}`,
+        error,
+      });
+    }
   }
 
   /**
    * Handle WebRTC state changes
    */
   handleWebRTCStateChange(state) {
-    console.log('CallManager: WebRTC state changed:', state);
+    try {
+      console.log('CallManager: WebRTC state changed:', state);
 
-    if (state === 'connected') {
-      this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_CONNECTED);
-    } else if (state === 'failed') {
-      this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_FAILED, {
-        error: 'WebRTC connection failed',
+      if (state === 'connected') {
+        this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_CONNECTED);
+      } else if (state === 'failed') {
+        this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_FAILED, {
+          error: 'WebRTC connection failed',
+        });
+      } else if (state === 'disconnected') {
+        this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_DISCONNECTED);
+      }
+    } catch (error) {
+      console.error('CallManager: Error handling WebRTC state change:', error);
+      this.emit(CALL_MANAGER_EVENTS.ERROR, {
+        type: ERROR_TYPES.CONNECTION_FAILED,
+        message: `Failed to handle WebRTC state change: ${error.message}`,
+        error,
       });
-    } else if (state === 'disconnected') {
-      this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_DISCONNECTED);
     }
   }
 
@@ -751,13 +803,22 @@ class CallManager {
    * Handle WebRTC ICE state changes
    */
   handleWebRTCIceStateChange(state) {
-    console.log('CallManager: WebRTC ICE state changed:', state);
+    try {
+      console.log('CallManager: WebRTC ICE state changed:', state);
 
-    if (state === 'connected' || state === 'completed') {
-      this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_CONNECTED);
-    } else if (state === 'failed') {
-      this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_FAILED, {
-        error: 'ICE connection failed',
+      if (state === 'connected' || state === 'completed') {
+        this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_CONNECTED);
+      } else if (state === 'failed') {
+        this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_FAILED, {
+          error: 'ICE connection failed',
+        });
+      }
+    } catch (error) {
+      console.error('CallManager: Error handling WebRTC ICE state change:', error);
+      this.emit(CALL_MANAGER_EVENTS.ERROR, {
+        type: ERROR_TYPES.CONNECTION_FAILED,
+        message: `Failed to handle WebRTC ICE state change: ${error.message}`,
+        error,
       });
     }
   }
@@ -844,6 +905,16 @@ class CallManager {
   }
 
   /**
+   * Clear WebRTC initialization timeout
+   */
+  clearWebRTCInitTimeout() {
+    if (this.webrtcInitTimeout) {
+      clearTimeout(this.webrtcInitTimeout);
+      this.webrtcInitTimeout = null;
+    }
+  }
+
+  /**
    * Get current call state
    */
   getCallState() {
@@ -877,6 +948,7 @@ class CallManager {
     console.log('CallManager: Force reset');
 
     this.clearOperationTimeout();
+    this.clearWebRTCInitTimeout();
     this.currentOperation = null;
 
     // Reset state machine
@@ -896,13 +968,14 @@ class CallManager {
 
     // Clear all timeouts and operations
     this.clearOperationTimeout();
+    this.clearWebRTCInitTimeout();
     this.currentOperation = null;
 
     try {
       // Clean up services in parallel for faster cleanup
       await Promise.all([
         this.webrtcService.cleanup(),
-        this.socketService.disconnect()
+        this.socketService.disconnect(),
       ]);
     } catch (error) {
       console.error('CallManager: Error during service cleanup:', error);
