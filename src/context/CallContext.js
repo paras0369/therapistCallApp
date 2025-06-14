@@ -1,122 +1,162 @@
+/**
+ * CallContext - Enhanced call context using the new calling system
+ * 
+ * This context provides a clean React interface to the CallManager system,
+ * with better state management and error handling.
+ */
+
 import React, { createContext, useContext, useReducer, useEffect, useCallback, useRef } from 'react';
-import CallService from '../services/CallService';
+import CallManager, { CALL_MANAGER_EVENTS, ERROR_TYPES } from '../services/CallManager';
+import { CALL_STATES } from '../services/CallStateMachine';
 import { useAuth } from './AuthContext';
 
 const CallContext = createContext();
 
-// Action types
+// Action types for the reducer
 const CALL_ACTIONS = {
-  SET_LOADING: 'SET_LOADING',
-  SET_CALL_STATE: 'SET_CALL_STATE',
-  SET_CONNECTION_STATE: 'SET_CONNECTION_STATE',
-  SET_CALL_DURATION: 'SET_CALL_DURATION',
-  SET_AUDIO_STATE: 'SET_AUDIO_STATE',
+  SET_MANAGER_STATE: 'SET_MANAGER_STATE',
+  SET_CALL_DATA: 'SET_CALL_DATA',
   SET_INCOMING_CALL: 'SET_INCOMING_CALL',
   CLEAR_INCOMING_CALL: 'CLEAR_INCOMING_CALL',
-  SET_CURRENT_THERAPIST: 'SET_CURRENT_THERAPIST',
   SET_ERROR: 'SET_ERROR',
   CLEAR_ERROR: 'CLEAR_ERROR',
-  RESET_CALL: 'RESET_CALL',
-};
-
-// Call states
-export const CALL_STATES = {
-  IDLE: 'idle',
-  INITIATING: 'initiating',
-  RINGING: 'ringing',
-  CONNECTING: 'connecting',
-  ACTIVE: 'active',
-  ENDING: 'ending',
-  ENDED: 'ended',
-  ERROR: 'error',
-};
-
-// Connection states
-export const CONNECTION_STATES = {
-  NEW: 'new',
-  CONNECTING: 'connecting',
-  CONNECTED: 'connected',
-  DISCONNECTED: 'disconnected',
-  FAILED: 'failed',
-  CLOSED: 'closed',
+  SET_LOADING: 'SET_LOADING',
+  SET_INITIALIZATION_STATE: 'SET_INITIALIZATION_STATE',
+  SET_CONNECTION_STATUS: 'SET_CONNECTION_STATUS',
+  SET_DEBUG_INFO: 'SET_DEBUG_INFO',
 };
 
 // Initial state
 const initialState = {
+  // Core call state
   callState: CALL_STATES.IDLE,
-  connectionState: CONNECTION_STATES.NEW,
-  callDuration: 0,
-  isCallActive: false,
-  isMuted: false,
-  isSpeakerOn: false,
+  callData: {
+    callId: null,
+    participantId: null,
+    participantName: null,
+    callType: null,
+    startTime: null,
+    endTime: null,
+  },
+  
+  // Incoming call state
   incomingCall: null,
-  currentCallId: null,
-  currentTherapist: null,
+  
+  // Manager state
+  isInitialized: false,
+  isInitializing: false,
+  
+  // Connection status
+  connectionStatus: {
+    socketConnected: false,
+    webrtcReady: false,
+    currentOperation: null,
+  },
+  
+  // UI state
   loading: false,
   error: null,
+  
+  // Debug info (development only)
+  debugInfo: null,
 };
+
+// Derived state helpers
+const getDerivedState = (state) => ({
+  ...state,
+  isCallActive: [
+    CALL_STATES.INITIATING,
+    CALL_STATES.CALLING,
+    CALL_STATES.RINGING,
+    CALL_STATES.CONNECTING,
+    CALL_STATES.CONNECTED,
+    CALL_STATES.DISCONNECTING,
+  ].includes(state.callState),
+  
+  isInCall: state.callState === CALL_STATES.CONNECTED,
+  
+  canStartCall: state.callState === CALL_STATES.IDLE && 
+                state.isInitialized && 
+                state.connectionStatus.socketConnected,
+                
+  canAcceptCall: state.callState === CALL_STATES.RINGING && 
+                 state.incomingCall !== null,
+                 
+  isConnecting: [
+    CALL_STATES.INITIATING,
+    CALL_STATES.CALLING,
+    CALL_STATES.CONNECTING,
+  ].includes(state.callState),
+  
+  hasError: state.error !== null,
+});
 
 // Reducer
 const callReducer = (state, action) => {
   switch (action.type) {
-    case CALL_ACTIONS.SET_LOADING:
+    case CALL_ACTIONS.SET_MANAGER_STATE:
       return {
         ...state,
-        loading: action.payload,
+        callState: action.payload.newState,
+        callData: action.payload.callData || state.callData,
       };
-    case CALL_ACTIONS.SET_CALL_STATE:
+      
+    case CALL_ACTIONS.SET_CALL_DATA:
       return {
         ...state,
-        callState: action.payload,
-        isCallActive: action.payload === CALL_STATES.ACTIVE,
+        callData: { ...state.callData, ...action.payload },
       };
-    case CALL_ACTIONS.SET_CONNECTION_STATE:
-      return {
-        ...state,
-        connectionState: action.payload,
-      };
-    case CALL_ACTIONS.SET_CALL_DURATION:
-      return {
-        ...state,
-        callDuration: action.payload,
-      };
-    case CALL_ACTIONS.SET_AUDIO_STATE:
-      return {
-        ...state,
-        isMuted: action.payload.isMuted !== undefined ? action.payload.isMuted : state.isMuted,
-        isSpeakerOn: action.payload.isSpeakerOn !== undefined ? action.payload.isSpeakerOn : state.isSpeakerOn,
-      };
+      
     case CALL_ACTIONS.SET_INCOMING_CALL:
       return {
         ...state,
         incomingCall: action.payload,
-        currentCallId: action.payload?.callId,
       };
+      
     case CALL_ACTIONS.CLEAR_INCOMING_CALL:
       return {
         ...state,
         incomingCall: null,
       };
-    case CALL_ACTIONS.SET_CURRENT_THERAPIST:
-      return {
-        ...state,
-        currentTherapist: action.payload,
-      };
+      
     case CALL_ACTIONS.SET_ERROR:
       return {
         ...state,
         error: action.payload,
         loading: false,
       };
+      
     case CALL_ACTIONS.CLEAR_ERROR:
       return {
         ...state,
         error: null,
       };
-    case CALL_ACTIONS.RESET_CALL:
+      
+    case CALL_ACTIONS.SET_LOADING:
       return {
-        ...initialState,
+        ...state,
+        loading: action.payload,
       };
+      
+    case CALL_ACTIONS.SET_INITIALIZATION_STATE:
+      return {
+        ...state,
+        isInitialized: action.payload.isInitialized,
+        isInitializing: action.payload.isInitializing,
+      };
+      
+    case CALL_ACTIONS.SET_CONNECTION_STATUS:
+      return {
+        ...state,
+        connectionStatus: { ...state.connectionStatus, ...action.payload },
+      };
+      
+    case CALL_ACTIONS.SET_DEBUG_INFO:
+      return {
+        ...state,
+        debugInfo: action.payload,
+      };
+      
     default:
       return state;
   }
@@ -126,297 +166,336 @@ const callReducer = (state, action) => {
 export const CallProvider = ({ children }) => {
   const [state, dispatch] = useReducer(callReducer, initialState);
   const { isAuthenticated } = useAuth();
-  const stateRef = useRef(state);
+  const callManagerRef = useRef(null);
+  const initializationPromiseRef = useRef(null);
 
-  // Update ref whenever state changes
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
-
-  // Initialize CallService when authenticated
+  // Initialize CallManager when authenticated
   useEffect(() => {
     if (isAuthenticated) {
-      initializeCallService();
+      initializeCallManager();
     } else {
-      // Clean up when not authenticated
-      CallService.disconnect();
-      dispatch({ type: CALL_ACTIONS.RESET_CALL });
+      cleanupCallManager();
     }
 
     return () => {
-      // Cleanup on unmount
-      CallService.disconnect();
+      cleanupCallManager();
     };
   }, [isAuthenticated]);
 
-  const initializeCallService = useCallback(async () => {
+  // Initialize CallManager
+  const initializeCallManager = useCallback(async () => {
+    // Prevent multiple initialization attempts
+    if (initializationPromiseRef.current) {
+      return initializationPromiseRef.current;
+    }
+
     try {
-      dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: true });
+      console.log('CallContextV2: Initializing CallManager...');
       
-      if (!CallService.isConnected) {
-        await CallService.initialize();
+      dispatch({
+        type: CALL_ACTIONS.SET_INITIALIZATION_STATE,
+        payload: { isInitialized: false, isInitializing: true },
+      });
+
+      // Clean up existing manager
+      if (callManagerRef.current) {
+        await callManagerRef.current.cleanup();
       }
+
+      // Create new CallManager
+      callManagerRef.current = new CallManager();
       
-      setupCallServiceListeners();
-      dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: false });
+      // Setup event listeners
+      setupCallManagerListeners();
+
+      // Initialize the manager
+      const result = await callManagerRef.current.initialize();
+      
+      if (result.success) {
+        console.log('CallContextV2: CallManager initialized successfully');
+        dispatch({
+          type: CALL_ACTIONS.SET_INITIALIZATION_STATE,
+          payload: { isInitialized: true, isInitializing: false },
+        });
+        updateConnectionStatus();
+      } else {
+        throw new Error(result.error);
+      }
+
+      initializationPromiseRef.current = null;
+      return result;
+
     } catch (error) {
-      console.error('Failed to initialize CallService:', error);
+      console.error('CallContextV2: CallManager initialization failed:', error);
+      
+      dispatch({
+        type: CALL_ACTIONS.SET_INITIALIZATION_STATE,
+        payload: { isInitialized: false, isInitializing: false },
+      });
+      
       dispatch({
         type: CALL_ACTIONS.SET_ERROR,
-        payload: 'Failed to initialize calling service',
+        payload: {
+          type: ERROR_TYPES.INITIALIZATION_FAILED,
+          message: `Failed to initialize calling service: ${error.message}`,
+          error,
+        },
       });
+
+      initializationPromiseRef.current = null;
+      throw error;
     }
   }, []);
 
-  const setupCallServiceListeners = useCallback(() => {
-    // Incoming call listener
-    CallService.setOnIncomingCall((data) => {
-      const currentState = stateRef.current;
-      
-      // Only accept incoming calls if we're in idle state or if we're the ones making the call
-      // Don't reject calls when in 'ended' state as this is a transitional state
-      if (currentState.callState !== CALL_STATES.IDLE && 
-          currentState.callState !== CALL_STATES.ENDED &&
-          currentState.callState !== CALL_STATES.INITIATING &&
-          currentState.callState !== CALL_STATES.RINGING) {
-        console.log('Rejecting incoming call - already in active call:', currentState.callState);
-        CallService.rejectCall(data.callId);
-        return;
-      }
+  // Setup CallManager event listeners
+  const setupCallManagerListeners = useCallback(() => {
+    if (!callManagerRef.current) return;
 
+    const manager = callManagerRef.current;
+
+    // State changes
+    manager.on(CALL_MANAGER_EVENTS.STATE_CHANGED, (event) => {
+      console.log('CallContextV2: State changed:', event);
+      dispatch({
+        type: CALL_ACTIONS.SET_MANAGER_STATE,
+        payload: event,
+      });
+      updateConnectionStatus();
+    });
+
+    // Call data changes
+    manager.on(CALL_MANAGER_EVENTS.CALL_DATA_CHANGED, (callData) => {
+      dispatch({
+        type: CALL_ACTIONS.SET_CALL_DATA,
+        payload: callData,
+      });
+    });
+
+    // Incoming call
+    manager.on(CALL_MANAGER_EVENTS.INCOMING_CALL, (callData) => {
+      console.log('CallContextV2: Incoming call:', callData);
       dispatch({
         type: CALL_ACTIONS.SET_INCOMING_CALL,
-        payload: data,
+        payload: callData,
       });
-      dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.RINGING });
     });
 
-    // Call accepted listener
-    CallService.setOnCallAccepted((data) => {
+    // Call connected
+    manager.on(CALL_MANAGER_EVENTS.CALL_CONNECTED, (callData) => {
+      console.log('CallContextV2: Call connected:', callData);
+      dispatch({ type: CALL_ACTIONS.CLEAR_ERROR });
+    });
+
+    // Call ended
+    manager.on(CALL_MANAGER_EVENTS.CALL_ENDED, (event) => {
+      console.log('CallContextV2: Call ended:', event);
       dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
-      dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.CONNECTING });
+      updateConnectionStatus();
     });
 
-    // Call rejected listener
-    CallService.setOnCallRejected((data) => {
-      console.log('Call rejected:', data);
-      dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
-      // Reset immediately for rejected calls to allow new calls - skip ENDED state
-      console.log('Resetting call state immediately after rejection');
-      dispatch({ type: CALL_ACTIONS.RESET_CALL });
+    // Errors
+    manager.on(CALL_MANAGER_EVENTS.ERROR, (error) => {
+      console.error('CallContextV2: CallManager error:', error);
+      dispatch({
+        type: CALL_ACTIONS.SET_ERROR,
+        payload: error,
+      });
+      updateConnectionStatus();
     });
 
-    // Call ended listener
-    CallService.setOnCallEnded((data) => {
-      console.log('Call ended:', data);
-      dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
-      dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ENDED });
-      dispatch({ type: CALL_ACTIONS.SET_CONNECTION_STATE, payload: CONNECTION_STATES.DISCONNECTED });
-      setTimeout(() => {
-        console.log('Resetting call state after call ended');
-        dispatch({ type: CALL_ACTIONS.RESET_CALL });
-      }, 500);
-    });
+    // Debug info (development only)
+    if (__DEV__) {
+      manager.on(CALL_MANAGER_EVENTS.DEBUG, (debug) => {
+        dispatch({
+          type: CALL_ACTIONS.SET_DEBUG_INFO,
+          payload: debug,
+        });
+      });
+    }
+  }, []);
 
-    // Remote stream received listener
-    CallService.setOnRemoteStreamReceived(() => {
-      dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ACTIVE });
-      dispatch({ type: CALL_ACTIONS.SET_CONNECTION_STATE, payload: CONNECTION_STATES.CONNECTED });
-    });
+  // Update connection status
+  const updateConnectionStatus = useCallback(() => {
+    if (!callManagerRef.current) return;
 
-    // ICE connection state change listener
-    CallService.setOnIceConnectionStateChange((iceState) => {
-      const connectionState = mapIceStateToConnectionState(iceState);
-      dispatch({ type: CALL_ACTIONS.SET_CONNECTION_STATE, payload: connectionState });
-      
-      if (iceState === 'connected' || iceState === 'completed') {
-        dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ACTIVE });
-      } else if (iceState === 'failed') {
-        dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ERROR });
-      }
-    });
-
-    // Connection state change listener
-    CallService.setOnConnectionStateChange((state) => {
-      if (state === 'failed' || state === 'disconnected') {
-        dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ERROR });
-      }
+    const status = callManagerRef.current.getConnectionStatus();
+    dispatch({
+      type: CALL_ACTIONS.SET_CONNECTION_STATUS,
+      payload: {
+        socketConnected: status.socketConnected,
+        webrtcReady: status.webrtcStatus?.hasPeerConnection || false,
+        currentOperation: status.currentOperation,
+      },
     });
   }, []);
 
-  // Helper function to map ICE states to our connection states
-  const mapIceStateToConnectionState = (iceState) => {
-    switch (iceState) {
-      case 'new':
-        return CONNECTION_STATES.NEW;
-      case 'checking':
-        return CONNECTION_STATES.CONNECTING;
-      case 'connected':
-      case 'completed':
-        return CONNECTION_STATES.CONNECTED;
-      case 'disconnected':
-        return CONNECTION_STATES.DISCONNECTED;
-      case 'failed':
-        return CONNECTION_STATES.FAILED;
-      case 'closed':
-        return CONNECTION_STATES.CLOSED;
-      default:
-        return CONNECTION_STATES.NEW;
+  // Cleanup CallManager
+  const cleanupCallManager = useCallback(async () => {
+    if (callManagerRef.current) {
+      await callManagerRef.current.cleanup();
+      callManagerRef.current = null;
     }
-  };
+    
+    initializationPromiseRef.current = null;
+    
+    dispatch({
+      type: CALL_ACTIONS.SET_INITIALIZATION_STATE,
+      payload: { isInitialized: false, isInitializing: false },
+    });
+    
+    dispatch({ type: CALL_ACTIONS.CLEAR_ERROR });
+    dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
+  }, []);
 
-  // Actions
-  const startCall = async (therapistId, therapistName) => {
-    console.log('StartCall called with state:', state.callState);
-    
-    // Always reset state before starting a new call, regardless of current state
-    console.log('Resetting call state before new call, current state:', state.callState);
-    
-    // Reset both service and context state
-    if (CallService.currentCallId) {
-      CallService.resetCallState();
+  // Action methods
+  const startCall = useCallback(async (therapistId, therapistName, callType = 'voice') => {
+    if (!callManagerRef.current) {
+      throw new Error('CallManager not initialized');
     }
-    dispatch({ type: CALL_ACTIONS.RESET_CALL });
-    
-    // Wait for state to properly reset
-    await new Promise(resolve => setTimeout(resolve, 100));
 
-    try {
-      // Clear any previous errors and set therapist info
-      dispatch({ type: CALL_ACTIONS.CLEAR_ERROR });
-      dispatch({ 
-        type: CALL_ACTIONS.SET_CURRENT_THERAPIST, 
-        payload: { id: therapistId, name: therapistName } 
-      });
-      
-      // Set call state to initiating
-      dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.INITIATING });
-      
-      const result = await CallService.startCall(therapistId);
-      
-      if (result.success) {
-        console.log('Call started successfully');
-        dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.RINGING });
-        return { success: true };
-      } else {
-        console.log('Call start failed:', result.error);
-        dispatch({
-          type: CALL_ACTIONS.SET_ERROR,
-          payload: result.error || 'Failed to start call',
-        });
-        dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ERROR });
-        return { success: false, error: result.error };
-      }
-    } catch (error) {
-      console.error('Start call error:', error);
-      dispatch({
-        type: CALL_ACTIONS.SET_ERROR,
-        payload: 'An unexpected error occurred while starting the call',
-      });
-      dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ERROR });
-      return { success: false, error: error.message };
+    // Prevent duplicate calls if already loading or in progress
+    if (state.loading || state.isCallActive) {
+      console.log('CallContext: Ignoring startCall - call already in progress');
+      return { success: false, error: 'Call already in progress' };
     }
-  };
 
-  const acceptCall = async (callId) => {
     try {
       dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: true });
       dispatch({ type: CALL_ACTIONS.CLEAR_ERROR });
-      
-      const result = await CallService.acceptCall(callId);
+
+      const result = await callManagerRef.current.startCall(therapistId, therapistName, callType);
       
       dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: false });
       
-      if (result.success) {
-        dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
-        dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.CONNECTING });
-        return { success: true };
-      } else {
-        dispatch({
-          type: CALL_ACTIONS.SET_ERROR,
-          payload: result.error || 'Failed to accept call',
-        });
-        return { success: false, error: result.error };
+      if (!result.success) {
+        throw new Error(result.error);
       }
+
+      return result;
     } catch (error) {
-      console.error('Accept call error:', error);
       dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: false });
-      dispatch({
-        type: CALL_ACTIONS.SET_ERROR,
-        payload: 'An unexpected error occurred while accepting the call',
-      });
-      return { success: false, error: error.message };
+      throw error;
     }
-  };
+  }, [state.loading, state.isCallActive]);
 
-  const rejectCall = (callId) => {
-    CallService.rejectCall(callId);
-    dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
-    dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ENDED });
-  };
+  const acceptCall = useCallback(async (callId) => {
+    if (!callManagerRef.current) {
+      throw new Error('CallManager not initialized');
+    }
 
-  const endCall = () => {
-    if (state.callState === CALL_STATES.ENDING || state.callState === CALL_STATES.ENDED) {
+    try {
+      dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: true });
+      dispatch({ type: CALL_ACTIONS.CLEAR_ERROR });
+
+      const result = await callManagerRef.current.acceptCall(callId);
+      
+      dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: false });
+      
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      return result;
+    } catch (error) {
+      dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: false });
+      throw error;
+    }
+  }, []);
+
+  const rejectCall = useCallback(async (callId) => {
+    if (!callManagerRef.current) {
+      throw new Error('CallManager not initialized');
+    }
+
+    try {
+      const result = await callManagerRef.current.rejectCall(callId);
+      dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
+      
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      return result;
+    } catch (error) {
+      console.error('CallContextV2: Reject call failed:', error);
+      throw error;
+    }
+  }, []);
+
+  const endCall = useCallback(async () => {
+    if (!callManagerRef.current) {
+      throw new Error('CallManager not initialized');
+    }
+
+    try {
+      const result = await callManagerRef.current.endCall();
+      
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      return result;
+    } catch (error) {
+      console.error('CallContextV2: End call failed:', error);
+      throw error;
+    }
+  }, []);
+
+  const forceReset = useCallback(async () => {
+    if (!callManagerRef.current) {
       return;
     }
 
-    console.log('Ending call');
-    dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ENDING });
-    CallService.endCall();
-  };
-
-  const toggleMute = () => {
-    if (CallService.localStream) {
-      const audioTrack = CallService.localStream.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        dispatch({
-          type: CALL_ACTIONS.SET_AUDIO_STATE,
-          payload: { isMuted: !audioTrack.enabled },
-        });
-      }
+    try {
+      await callManagerRef.current.forceReset();
+      dispatch({ type: CALL_ACTIONS.CLEAR_ERROR });
+      dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
+      updateConnectionStatus();
+    } catch (error) {
+      console.error('CallContextV2: Force reset failed:', error);
     }
-  };
+  }, [updateConnectionStatus]);
 
-  const toggleSpeaker = async () => {
-    // This would be implemented in CallService
-    const newSpeakerState = !state.isSpeakerOn;
-    // await CallService.toggleSpeaker(newSpeakerState);
-    dispatch({
-      type: CALL_ACTIONS.SET_AUDIO_STATE,
-      payload: { isSpeakerOn: newSpeakerState },
-    });
-  };
-
-  const updateCallDuration = (duration) => {
-    dispatch({ type: CALL_ACTIONS.SET_CALL_DURATION, payload: duration });
-  };
-
-  const clearError = () => {
+  const clearError = useCallback(() => {
     dispatch({ type: CALL_ACTIONS.CLEAR_ERROR });
-  };
+  }, []);
 
-  const resetCall = () => {
-    console.log('Manually resetting call state');
-    // Also reset the service state
-    if (CallService.currentCallId) {
-      CallService.resetCallState();
+  const retryInitialization = useCallback(async () => {
+    if (state.isInitializing) {
+      return;
     }
-    dispatch({ type: CALL_ACTIONS.RESET_CALL });
-  };
 
+    try {
+      await initializeCallManager();
+    } catch (error) {
+      console.error('CallContextV2: Retry initialization failed:', error);
+    }
+  }, [state.isInitializing, initializeCallManager]);
+
+  // Get debug information (development only)
+  const getDebugInfo = useCallback(() => {
+    if (!callManagerRef.current) {
+      return null;
+    }
+    return callManagerRef.current.getDebugInfo();
+  }, []);
+
+  // Context value with derived state
   const value = {
-    ...state,
+    // Core state
+    ...getDerivedState(state),
+    
+    // Actions
     startCall,
     acceptCall,
     rejectCall,
     endCall,
-    toggleMute,
-    toggleSpeaker,
-    updateCallDuration,
+    forceReset,
     clearError,
-    resetCall,
-    initializeCallService,
+    retryInitialization,
+    
+    // Utilities
+    getDebugInfo: __DEV__ ? getDebugInfo : null,
   };
 
   return (
@@ -426,13 +505,50 @@ export const CallProvider = ({ children }) => {
   );
 };
 
-// Hook to use call context
+// Hook to use the call context
 export const useCall = () => {
   const context = useContext(CallContext);
   if (!context) {
     throw new Error('useCall must be used within a CallProvider');
   }
   return context;
+};
+
+// Helper hook for call state checks
+export const useCallState = () => {
+  const { callState, isCallActive, isInCall, canStartCall, canAcceptCall, isConnecting } = useCall();
+  
+  return {
+    callState,
+    isIdle: callState === CALL_STATES.IDLE,
+    isInitiating: callState === CALL_STATES.INITIATING,
+    isCalling: callState === CALL_STATES.CALLING,
+    isRinging: callState === CALL_STATES.RINGING,
+    isConnecting,
+    isConnected: callState === CALL_STATES.CONNECTED,
+    isEnding: callState === CALL_STATES.DISCONNECTING,
+    isEnded: callState === CALL_STATES.ENDED,
+    isFailed: callState === CALL_STATES.FAILED,
+    isRejected: callState === CALL_STATES.REJECTED,
+    isCallActive,
+    isInCall,
+    canStartCall,
+    canAcceptCall,
+  };
+};
+
+// Helper hook for connection status
+export const useConnectionStatus = () => {
+  const { connectionStatus, isInitialized, isInitializing, hasError, error } = useCall();
+  
+  return {
+    ...connectionStatus,
+    isInitialized,
+    isInitializing,
+    isReady: isInitialized && connectionStatus.socketConnected,
+    hasError,
+    error,
+  };
 };
 
 export default CallContext;

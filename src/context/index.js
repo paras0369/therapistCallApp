@@ -1,2 +1,13 @@
+// Core contexts
 export { AuthProvider, useAuth } from './AuthContext';
-export { CallProvider, useCall, CALL_STATES, CONNECTION_STATES } from './CallContext';
+
+// Calling system exports
+export { 
+  CallProvider,
+  useCall, 
+  useCallState, 
+  useConnectionStatus 
+} from './CallContext';
+
+// State constants
+export { CALL_STATES } from '../services/CallStateMachine';

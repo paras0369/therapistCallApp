@@ -9,7 +9,7 @@ import {
   BackHandler,
 } from 'react-native';
 import { Button, Avatar, LoadingSpinner } from './common';
-import { useCall, useAuth, CALL_STATES } from '../context';
+import { useCall, useCallState, useAuth, CALL_STATES } from '../context';
 import theme from '../theme';
 
 // Safely import InCallManager with fallback
@@ -24,22 +24,27 @@ try {
 const CallScreen = ({ navigation }) => {
   const { userType } = useAuth();
   const {
-    callState,
-    isMuted,
-    isSpeakerOn,
-    currentTherapist,
+    callData,
     incomingCall,
     error,
-    toggleMute,
-    toggleSpeaker,
     endCall,
     clearError,
   } = useCall();
+  
+  const { callState, isInCall, isConnecting } = useCallState();
+  
+  // Note: V2 system doesn't have toggleMute/toggleSpeaker yet - these can be added later
+  const [isMuted, setIsMuted] = useState(false);
+  const [isSpeakerOn, setIsSpeakerOn] = useState(false);
+  
+  const toggleMute = () => setIsMuted(!isMuted);
+  const toggleSpeaker = () => setIsSpeakerOn(!isSpeakerOn);
 
   const [callDuration, setCallDuration] = useState(0);
   const [showError, setShowError] = useState(false);
   const intervalRef = useRef(null);
   const navigationTimeoutRef = useRef(null);
+  const isNavigatingRef = useRef(false);
 
   // Reset call duration when component mounts
   useEffect(() => {
@@ -61,16 +66,16 @@ const CallScreen = ({ navigation }) => {
   const getParticipantInfo = useCallback(() => {
     if (userType === 'therapist') {
       return {
-        name: incomingCall?.userName || 'User',
+        name: incomingCall?.participantName || callData?.participantName || 'User',
         emoji: '👤',
       };
     } else {
       return {
-        name: currentTherapist?.name || 'Therapist',
+        name: callData?.participantName || 'Therapist',
         emoji: '👨‍⚕️',
       };
     }
-  }, [userType, incomingCall, currentTherapist]);
+  }, [userType, incomingCall, callData]);
 
   const participant = getParticipantInfo();
 
@@ -78,7 +83,7 @@ const CallScreen = ({ navigation }) => {
   useEffect(() => {
     const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
       // Prevent going back during an active call
-      if (callState === CALL_STATES.ACTIVE || callState === CALL_STATES.CONNECTING) {
+      if (callState === CALL_STATES.CONNECTED || callState === CALL_STATES.CONNECTING) {
         Alert.alert(
           'End Call',
           'Are you sure you want to end the call?',
@@ -97,7 +102,7 @@ const CallScreen = ({ navigation }) => {
 
   // Initialize audio management
   useEffect(() => {
-    if (InCallManager && (callState === CALL_STATES.ACTIVE || callState === CALL_STATES.CONNECTING)) {
+    if (InCallManager && (callState === CALL_STATES.CONNECTED || callState === CALL_STATES.CONNECTING)) {
       try {
         InCallManager.start({ media: 'audio', auto: true, ringback: '' });
         InCallManager.setKeepScreenOn(true);
@@ -121,13 +126,15 @@ const CallScreen = ({ navigation }) => {
   useEffect(() => {
     console.log('CallScreen timer effect - callState:', callState);
     
-    if (callState === CALL_STATES.ACTIVE) {
+    // Always clear existing timer first
+    if (intervalRef.current) {
+      console.log('Clearing existing timer');
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    
+    if (callState === CALL_STATES.CONNECTED) {
       console.log('Starting call duration timer');
-      // Clear any existing interval first
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      
       intervalRef.current = setInterval(() => {
         setCallDuration(prev => {
           const newDuration = prev + 1;
@@ -135,21 +142,16 @@ const CallScreen = ({ navigation }) => {
           return newDuration;
         });
       }, 1000);
-    } else {
-      console.log('Clearing call duration timer, state:', callState);
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-      if (callState === CALL_STATES.IDLE) {
-        console.log('Resetting call duration to 0');
-        setCallDuration(0);
-      }
+    } else if (callState === CALL_STATES.IDLE) {
+      console.log('Resetting call duration to 0');
+      setCallDuration(0);
     }
 
     return () => {
       if (intervalRef.current) {
+        console.log('Cleanup: clearing timer');
         clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
     };
   }, [callState]);
@@ -195,7 +197,15 @@ const CallScreen = ({ navigation }) => {
   }, [error]);
 
   const navigateBack = useCallback(() => {
+    // Prevent multiple navigation calls
+    if (isNavigatingRef.current) {
+      console.log('CallScreen: Navigation already in progress, ignoring');
+      return;
+    }
+    
+    isNavigatingRef.current = true;
     const targetScreen = userType === 'therapist' ? 'TherapistDashboard' : 'UserDashboard';
+    console.log('CallScreen: Navigating to', targetScreen);
     navigation.replace(targetScreen);
   }, [navigation, userType]);
 
@@ -237,27 +247,30 @@ const CallScreen = ({ navigation }) => {
         return { text: 'Preparing...', color: theme.colors.textSecondary };
       case CALL_STATES.INITIATING:
         return { text: 'Initiating...', color: theme.colors.warning };
+      case CALL_STATES.CALLING:
+        return { text: 'Calling...', color: theme.colors.warning };
       case CALL_STATES.RINGING:
         return { text: 'Ringing...', color: theme.colors.warning };
       case CALL_STATES.CONNECTING:
         return { text: 'Connecting...', color: theme.colors.warning };
-      case CALL_STATES.ACTIVE:
+      case CALL_STATES.CONNECTED:
         return { text: 'Connected', color: theme.colors.success };
-      case CALL_STATES.ENDING:
+      case CALL_STATES.DISCONNECTING:
         return { text: 'Ending...', color: theme.colors.error };
       case CALL_STATES.ENDED:
         return { text: 'Call Ended', color: theme.colors.textSecondary };
-      case CALL_STATES.ERROR:
+      case CALL_STATES.FAILED:
         return { text: 'Connection Error', color: theme.colors.error };
+      case CALL_STATES.REJECTED:
+        return { text: 'Call Rejected', color: theme.colors.error };
       default:
         return { text: 'Preparing...', color: theme.colors.textSecondary };
     }
   };
 
   const statusInfo = getCallStatusInfo();
-  const isCallActive = callState === CALL_STATES.ACTIVE;
-  const canControl = callState === CALL_STATES.ACTIVE;
-  const isConnecting = callState === CALL_STATES.CONNECTING || callState === CALL_STATES.INITIATING;
+  const isCallActive = callState === CALL_STATES.CONNECTED;
+  const canControl = callState === CALL_STATES.CONNECTED;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -310,7 +323,7 @@ const CallScreen = ({ navigation }) => {
         {/* Error Display */}
         {showError && error && (
           <View style={styles.errorContainer}>
-            <Text style={styles.errorText}>{error}</Text>
+            <Text style={styles.errorText}>{error.message || error.error || 'An error occurred'}</Text>
             <Button
               title="Dismiss"
               variant="secondary"

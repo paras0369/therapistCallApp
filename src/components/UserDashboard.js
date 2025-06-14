@@ -26,6 +26,7 @@ const UserDashboard = ({ navigation }) => {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [userProfile, setUserProfile] = useState(null);
+  const [startingCall, setStartingCall] = useState(false);
 
   // Context hooks
   const { user, logout } = useAuth();
@@ -99,6 +100,12 @@ const UserDashboard = ({ navigation }) => {
 
   const handleStartCall = useCallback(
     async (therapistId, therapistName) => {
+      // Prevent duplicate calls
+      if (startingCall) {
+        console.log('Call already in progress, ignoring duplicate request');
+        return;
+      }
+
       if (userProfile.coins < 6) {
         Alert.alert(
           'Insufficient Coins',
@@ -112,17 +119,30 @@ const UserDashboard = ({ navigation }) => {
         {
           text: 'Call',
           onPress: async () => {
-            const result = await startCall(therapistId, therapistName);
-            if (!result.success) {
-              Alert.alert('Error', result.error || 'Failed to start call');
-            } else {
-              navigation.navigate('CallScreen');
+            if (startingCall) {
+              console.log('Call already in progress, ignoring');
+              return;
+            }
+            
+            setStartingCall(true);
+            try {
+              const result = await startCall(therapistId, therapistName);
+              if (!result.success) {
+                Alert.alert('Error', result.error || 'Failed to start call');
+              } else {
+                navigation.navigate('CallScreen');
+              }
+            } catch (error) {
+              console.error('Start call error:', error);
+              Alert.alert('Error', 'Failed to start call');
+            } finally {
+              setStartingCall(false);
             }
           },
         },
       ]);
     },
-    [userProfile, startCall, navigation],
+    [userProfile, startCall, navigation, startingCall],
   );
 
 
@@ -143,7 +163,6 @@ const UserDashboard = ({ navigation }) => {
     ({ item }) => (
       <Card
         style={styles.therapistCard}
-        onPress={() => handleStartCall(item._id, item.name)}
         shadow="md"
       >
         <View style={styles.therapistHeader}>
@@ -170,15 +189,16 @@ const UserDashboard = ({ navigation }) => {
         </View>
 
         <Button
-          title="Start Call"
+          title={startingCall ? "Calling..." : "Start Call"}
           variant="primary"
           size="medium"
           style={styles.callButton}
+          disabled={startingCall}
           onPress={() => handleStartCall(item._id, item.name)}
         />
       </Card>
     ),
-    [handleStartCall],
+    [handleStartCall, startingCall],
   );
 
   if (loading) {

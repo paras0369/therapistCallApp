@@ -41,7 +41,7 @@ const TherapistDashboard = ({ navigation }) => {
     if (incomingCall) {
       Alert.alert(
         'Incoming Call',
-        `Call from ${incomingCall.userName}`,
+        `Call from ${incomingCall.participantName}`,
         [
           { text: 'Decline', onPress: () => handleRejectCall(incomingCall.callId) },
           { text: 'Accept', onPress: () => handleAcceptCall(incomingCall.callId) },
