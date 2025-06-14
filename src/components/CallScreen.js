@@ -1,14 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
-  TouchableOpacity,
   StyleSheet,
   SafeAreaView,
+  StatusBar,
   Alert,
+  BackHandler,
 } from 'react-native';
-import CallService from '../services/CallService';
-import AuthService from '../services/AuthService';
+import { Button, Avatar, LoadingSpinner } from './common';
+import { useCall, useAuth, CALL_STATES } from '../context';
+import theme from '../theme';
 
 // Safely import InCallManager with fallback
 let InCallManager = null;
@@ -17,85 +19,94 @@ try {
   InCallManager = InCallManagerModule.default || InCallManagerModule;
 } catch (error) {
   console.warn('InCallManager not available:', error.message);
-  console.warn(
-    'To enable speaker functionality, run: npm install && npm run android',
-  );
 }
 
 const CallScreen = ({ navigation }) => {
-  const [isCallActive, setIsCallActive] = useState(false);
+  const { userType } = useAuth();
+  const {
+    callState,
+    isMuted,
+    isSpeakerOn,
+    currentTherapist,
+    incomingCall,
+    error,
+    toggleMute,
+    toggleSpeaker,
+    endCall,
+    clearError,
+  } = useCall();
+
   const [callDuration, setCallDuration] = useState(0);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isSpeakerOn, setIsSpeakerOn] = useState(false);
-  const [connectionState, setConnectionState] = useState('connecting');
+  const [showError, setShowError] = useState(false);
+  const intervalRef = useRef(null);
+  const navigationTimeoutRef = useRef(null);
 
-  const navigateBack = async () => {
-    try {
-      const userType = await AuthService.getUserType();
-      if (userType === 'therapist') {
-        navigation.navigate('TherapistDashboard');
-      } else {
-        navigation.navigate('UserDashboard');
-      }
-    } catch (error) {
-      console.error('Error getting user type:', error);
-      navigation.navigate('UserDashboard');
-    }
-  };
-
+  // Reset call duration when component mounts
   useEffect(() => {
-    // Initialize audio management if available
-    if (InCallManager) {
+    console.log('CallScreen mounted with state:', callState);
+    setCallDuration(0);
+    
+    return () => {
+      console.log('CallScreen unmounting');
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+      if (navigationTimeoutRef.current) {
+        clearTimeout(navigationTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  // Get call participant info
+  const getParticipantInfo = useCallback(() => {
+    if (userType === 'therapist') {
+      return {
+        name: incomingCall?.userName || 'User',
+        emoji: '👤',
+      };
+    } else {
+      return {
+        name: currentTherapist?.name || 'Therapist',
+        emoji: '👨‍⚕️',
+      };
+    }
+  }, [userType, incomingCall, currentTherapist]);
+
+  const participant = getParticipantInfo();
+
+  // Handle back button
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      // Prevent going back during an active call
+      if (callState === CALL_STATES.ACTIVE || callState === CALL_STATES.CONNECTING) {
+        Alert.alert(
+          'End Call',
+          'Are you sure you want to end the call?',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'End Call', style: 'destructive', onPress: handleEndCall },
+          ]
+        );
+        return true; // Prevent default back action
+      }
+      return false; // Allow default back action
+    });
+
+    return () => backHandler.remove();
+  }, [callState]);
+
+  // Initialize audio management
+  useEffect(() => {
+    if (InCallManager && (callState === CALL_STATES.ACTIVE || callState === CALL_STATES.CONNECTING)) {
       try {
         InCallManager.start({ media: 'audio', auto: true, ringback: '' });
-        InCallManager.setForceSpeakerphoneOn(false);
-        InCallManager.setSpeakerphoneOn(false);
         InCallManager.setKeepScreenOn(true);
-        console.log('InCallManager initialized successfully');
       } catch (error) {
         console.warn('Failed to initialize InCallManager:', error);
       }
-    } else {
-      console.warn(
-        'InCallManager not available - speaker functionality will be limited',
-      );
     }
-
-    // Initialize CallService if not already done
-    if (!CallService.isConnected) {
-      CallService.initialize().catch(error => {
-        console.error('Failed to initialize CallService:', error);
-        Alert.alert('Connection Error', 'Failed to initialize calling service');
-        navigateBack();
-      });
-    }
-
-    CallService.setOnCallEnded(() => {
-      setIsCallActive(false);
-      setConnectionState('disconnected');
-      navigateBack();
-    });
-
-    CallService.setOnRemoteStreamReceived(() => {
-      console.log('Remote stream received, activating call');
-      setIsCallActive(true);
-      setConnectionState('connected');
-    });
-
-    // Add connection state monitoring
-    CallService.setOnIceConnectionStateChange(state => {
-      console.log('ICE connection state:', state);
-      setConnectionState(state);
-      if (state === 'connected' || state === 'completed') {
-        setIsCallActive(true);
-      } else if (state === 'failed' || state === 'disconnected') {
-        setIsCallActive(false);
-        Alert.alert('Connection Lost', 'The call connection was lost');
-      }
-    });
 
     return () => {
-      // Cleanup audio management
       if (InCallManager) {
         try {
           InCallManager.stop();
@@ -104,238 +115,243 @@ const CallScreen = ({ navigation }) => {
         }
       }
     };
-  }, [navigation]);
+  }, [callState]);
 
-  // Separate useEffect for timer to avoid recreation
+  // Call duration timer
   useEffect(() => {
-    let interval;
-
-    if (isCallActive) {
-      interval = setInterval(() => {
-        setCallDuration(prev => prev + 1);
+    console.log('CallScreen timer effect - callState:', callState);
+    
+    if (callState === CALL_STATES.ACTIVE) {
+      console.log('Starting call duration timer');
+      // Clear any existing interval first
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+      
+      intervalRef.current = setInterval(() => {
+        setCallDuration(prev => {
+          const newDuration = prev + 1;
+          console.log('Call duration updated:', newDuration);
+          return newDuration;
+        });
       }, 1000);
+    } else {
+      console.log('Clearing call duration timer, state:', callState);
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      if (callState === CALL_STATES.IDLE) {
+        console.log('Resetting call duration to 0');
+        setCallDuration(0);
+      }
     }
 
     return () => {
-      if (interval) {
-        clearInterval(interval);
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
       }
     };
-  }, [isCallActive]);
+  }, [callState]);
 
-  const formatDuration = seconds => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs
-      .toString()
-      .padStart(2, '0')}`;
-  };
-
-  const handleEndCall = () => {
-    Alert.alert('End Call', 'Are you sure you want to end this call?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'End Call',
-        style: 'destructive',
-        onPress: () => {
-          CallService.endCall();
-          setIsCallActive(false);
-          navigateBack();
-        },
-      },
-    ]);
-  };
-
-  const toggleMute = () => {
-    if (CallService.localStream) {
-      const audioTrack = CallService.localStream.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsMuted(!audioTrack.enabled);
+  // Handle navigation based on call state
+  useEffect(() => {
+    if (callState === CALL_STATES.ENDED) {
+      // Clear any existing timeout
+      if (navigationTimeoutRef.current) {
+        clearTimeout(navigationTimeoutRef.current);
       }
+
+      // Navigate back to appropriate dashboard after a short delay
+      navigationTimeoutRef.current = setTimeout(() => {
+        console.log('CallScreen: Navigating back due to ENDED state');
+        navigateBack();
+      }, 1000);
+    } else if (callState === CALL_STATES.IDLE) {
+      // For IDLE state, navigate back immediately (this shouldn't happen in CallScreen)
+      console.log('CallScreen: Navigating back due to IDLE state');
+      navigateBack();
     }
-  };
 
-  const toggleSpeaker = async () => {
-    const newSpeakerState = !isSpeakerOn;
+    return () => {
+      if (navigationTimeoutRef.current) {
+        clearTimeout(navigationTimeoutRef.current);
+      }
+    };
+  }, [callState, navigateBack]);
 
+  // Handle errors
+  useEffect(() => {
+    if (error) {
+      setShowError(true);
+      // Auto-hide error after 5 seconds
+      const errorTimeout = setTimeout(() => {
+        setShowError(false);
+        clearError();
+      }, 5000);
+
+      return () => clearTimeout(errorTimeout);
+    }
+  }, [error]);
+
+  const navigateBack = useCallback(() => {
+    const targetScreen = userType === 'therapist' ? 'TherapistDashboard' : 'UserDashboard';
+    navigation.replace(targetScreen);
+  }, [navigation, userType]);
+
+  const handleEndCall = useCallback(() => {
+    endCall();
+  }, [endCall]);
+
+  const handleToggleSpeaker = useCallback(() => {
     if (InCallManager) {
       try {
-        console.log(
-          'Attempting to toggle speaker to:',
-          newSpeakerState ? 'ON' : 'OFF',
-        );
-
-        // Identical speaker functionality for both users and therapists
-        if (newSpeakerState) {
-          // Turn speaker ON - same logic for all users
-          await InCallManager.setSpeakerphoneOn(true);
-          await InCallManager.setForceSpeakerphoneOn(true);
-
-          // Try all possible speaker routes
-          const speakerRoutes = ['SPEAKER', 'SPEAKER_PHONE', 'BLUETOOTH_SCO'];
-          let routeSet = false;
-          for (const route of speakerRoutes) {
-            try {
-              await InCallManager.chooseAudioRoute(route);
-              console.log(`Successfully set audio route to ${route}`);
-              routeSet = true;
-              break;
-            } catch (routeError) {
-              console.log(`Audio route ${route} failed, trying next option`);
-            }
-          }
-
-          // Enhanced audio session management for all user types
-          try {
-            await InCallManager.start({
-              media: 'audio',
-              auto: false,
-              ringback: '',
-            });
-            await InCallManager.setKeepScreenOn(true);
-            console.log('Audio session configured for speaker mode');
-          } catch (sessionError) {
-            console.log('Audio session fallback completed');
-          }
-        } else {
-          // Turn speaker OFF - same logic for all users
-          await InCallManager.setSpeakerphoneOn(false);
-          await InCallManager.setForceSpeakerphoneOn(false);
-
-          // Try all possible earpiece routes
-          const earRoutes = [
-            'EARPIECE',
-            'WIRED_HEADSET',
-            'PHONE',
-            'BLUETOOTH_SCO',
-          ];
-          let routeSet = false;
-          for (const route of earRoutes) {
-            try {
-              await InCallManager.chooseAudioRoute(route);
-              console.log(`Successfully set audio route to ${route}`);
-              routeSet = true;
-              break;
-            } catch (routeError) {
-              console.log(`Audio route ${route} failed, trying next option`);
-            }
-          }
-        }
-
-        setIsSpeakerOn(newSpeakerState);
-        console.log(
-          `Speaker successfully toggled to ${newSpeakerState ? 'ON' : 'OFF'}`,
-        );
-
-        // Simple confirmation without user type distinction
+        const newSpeakerState = !isSpeakerOn;
+        InCallManager.setSpeakerphoneOn(newSpeakerState);
+        toggleSpeaker();
       } catch (error) {
         console.error('Error toggling speaker:', error);
-        // Always update visual state and provide feedback
-        setIsSpeakerOn(newSpeakerState);
+        toggleSpeaker(); // Still update state
       }
     } else {
-      // Fallback for when InCallManager is not available
-      setIsSpeakerOn(newSpeakerState);
+      toggleSpeaker();
+    }
+  }, [isSpeakerOn, toggleSpeaker]);
+
+  const handleDismissError = useCallback(() => {
+    setShowError(false);
+    clearError();
+  }, [clearError]);
+
+  // Format duration as MM:SS
+  const formatDuration = useCallback((seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }, []);
+
+  // Get call status info
+  const getCallStatusInfo = () => {
+    switch (callState) {
+      case CALL_STATES.IDLE:
+        return { text: 'Preparing...', color: theme.colors.textSecondary };
+      case CALL_STATES.INITIATING:
+        return { text: 'Initiating...', color: theme.colors.warning };
+      case CALL_STATES.RINGING:
+        return { text: 'Ringing...', color: theme.colors.warning };
+      case CALL_STATES.CONNECTING:
+        return { text: 'Connecting...', color: theme.colors.warning };
+      case CALL_STATES.ACTIVE:
+        return { text: 'Connected', color: theme.colors.success };
+      case CALL_STATES.ENDING:
+        return { text: 'Ending...', color: theme.colors.error };
+      case CALL_STATES.ENDED:
+        return { text: 'Call Ended', color: theme.colors.textSecondary };
+      case CALL_STATES.ERROR:
+        return { text: 'Connection Error', color: theme.colors.error };
+      default:
+        return { text: 'Preparing...', color: theme.colors.textSecondary };
     }
   };
+
+  const statusInfo = getCallStatusInfo();
+  const isCallActive = callState === CALL_STATES.ACTIVE;
+  const canControl = callState === CALL_STATES.ACTIVE;
+  const isConnecting = callState === CALL_STATES.CONNECTING || callState === CALL_STATES.INITIATING;
 
   return (
     <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor={theme.colors.primary} />
+      
+      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={navigateBack}>
-          <Text style={styles.backButtonText}>←</Text>
-        </TouchableOpacity>
-        <View style={styles.callStatus}>
-          <Text style={styles.title}>Therapy Session</Text>
-          <View style={styles.statusContainer}>
-            {isCallActive && <View style={styles.statusDot} />}
-            <Text style={styles.status}>
-              {isCallActive
-                ? 'Connected'
-                : `${
-                    connectionState.charAt(0).toUpperCase() +
-                    connectionState.slice(1)
-                  }...`}
-            </Text>
-          </View>
-        </View>
-        <View style={styles.placeholder} />
-      </View>
-
-      <View style={styles.content}>
-        <View style={styles.callInfo}>
-          <View style={styles.avatarContainer}>
-            <View style={styles.avatar}>
-              <View style={styles.avatarRing}>
-                <Text style={styles.avatarText}>👤</Text>
-              </View>
-            </View>
-          </View>
-
-          <Text style={styles.duration}>{formatDuration(callDuration)}</Text>
-
-          <Text style={styles.callSubtext}>
-            {isCallActive ? 'Session in progress' : 'Connecting...'}
+        <Text style={styles.sessionTitle}>Therapy Session</Text>
+        <View style={styles.statusContainer}>
+          <View style={[styles.statusDot, { backgroundColor: statusInfo.color }]} />
+          <Text style={[styles.statusText, { color: statusInfo.color }]}>
+            {statusInfo.text}
           </Text>
         </View>
-
-        <View style={styles.controlsContainer}>
-          <View style={styles.topControls}>
-            <TouchableOpacity
-              style={[styles.controlButton, isMuted && styles.mutedButton]}
-              onPress={toggleMute}
-            >
-              <Text style={styles.controlButtonText}>
-                {isMuted ? '🔇' : '🎤'}
-              </Text>
-              <Text style={styles.controlButtonLabel}>
-                {isMuted ? 'Unmute' : 'Mute'}
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.controlButton,
-                isSpeakerOn && styles.speakerOnButton,
-              ]}
-              onPress={toggleSpeaker}
-            >
-              <Text style={styles.controlButtonText}>
-                {isSpeakerOn ? '🔊' : '🔈'}
-              </Text>
-              <Text style={styles.controlButtonLabel}>
-                {isSpeakerOn ? 'Speaker' : 'Speaker'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          <TouchableOpacity
-            style={styles.endCallButton}
-            onPress={handleEndCall}
-          >
-            <View style={styles.endCallButtonInner}>
-              <Text style={styles.endCallButtonText}>📞</Text>
-            </View>
-            <Text style={styles.endCallLabel}>End Call</Text>
-          </TouchableOpacity>
-        </View>
       </View>
 
-      <View style={styles.footer}>
-        <View style={styles.costCard}>
-          <Text style={styles.costIcon}>💰</Text>
-          <View>
-            <Text style={styles.costAmount}>6 coins/minute</Text>
-            <Text style={styles.costLabel}>Session rate</Text>
-          </View>
+      {/* Main Content */}
+      <View style={styles.content}>
+        {/* Avatar Section */}
+        <View style={styles.avatarSection}>
+          <Avatar
+            size="xxxxl"
+            emoji={participant.emoji}
+            backgroundColor={theme.colors.primaryLight}
+            style={[
+              styles.avatar,
+              isCallActive && styles.avatarActive
+            ]}
+          />
+          <Text style={styles.participantName}>
+            {participant.name}
+          </Text>
+          {isConnecting && (
+            <View style={styles.loadingContainer}>
+              <LoadingSpinner size="small" color={theme.colors.primary} />
+            </View>
+          )}
         </View>
-        {callDuration >= 10 && (
-          <View style={styles.bonusCard}>
-            <Text style={styles.bonusIcon}>🎉</Text>
-            <Text style={styles.bonusText}>Bonus rate active!</Text>
+
+        {/* Duration Section */}
+        <View style={styles.durationSection}>
+          <Text style={styles.duration}>
+            {formatDuration(callDuration)}
+          </Text>
+          {isCallActive && (
+            <Text style={styles.rateText}>6 coins/min</Text>
+          )}
+        </View>
+
+        {/* Error Display */}
+        {showError && error && (
+          <View style={styles.errorContainer}>
+            <Text style={styles.errorText}>{error}</Text>
+            <Button
+              title="Dismiss"
+              variant="secondary"
+              size="small"
+              onPress={handleDismissError}
+              style={styles.dismissButton}
+            />
           </View>
         )}
+
+        {/* Controls Section */}
+        <View style={styles.controlsSection}>
+          <View style={styles.audioControls}>
+            <Button
+              title={isMuted ? 'Unmute' : 'Mute'}
+              variant={isMuted ? 'danger' : 'secondary'}
+              size="medium"
+              onPress={toggleMute}
+              disabled={!canControl}
+              style={styles.controlButton}
+            />
+            
+            <Button
+              title={isSpeakerOn ? 'Speaker' : 'Earpiece'}
+              variant={isSpeakerOn ? 'primary' : 'secondary'}
+              size="medium"
+              onPress={handleToggleSpeaker}
+              disabled={!canControl}
+              style={styles.controlButton}
+            />
+          </View>
+
+          <Button
+            title="End Call"
+            variant="danger"
+            size="large"
+            onPress={handleEndCall}
+            style={styles.endCallButton}
+            disabled={callState === CALL_STATES.ENDING}
+          />
+        </View>
       </View>
     </SafeAreaView>
   );
@@ -344,43 +360,18 @@ const CallScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: theme.colors.primary,
   },
   header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: 60,
-    paddingHorizontal: 24,
-    paddingBottom: 20,
-    backgroundColor: '#FFFFFF',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 3,
+    paddingTop: theme.spacing.xl,
+    paddingBottom: theme.spacing.xxl,
   },
-  backButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#F5F5F5',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  backButtonText: {
-    fontSize: 20,
-    color: '#2C2C2C',
-    fontWeight: '600',
-  },
-  callStatus: {
-    alignItems: 'center',
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#2C2C2C',
-    marginBottom: 4,
+  sessionTitle: {
+    fontSize: theme.fonts.sizes.xl,
+    fontWeight: theme.fonts.weights.bold,
+    color: theme.colors.white,
+    marginBottom: theme.spacing.md,
   },
   statusContainer: {
     flexDirection: 'row',
@@ -390,187 +381,85 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#4CAF50',
-    marginRight: 6,
+    marginRight: theme.spacing.xs,
   },
-  status: {
-    fontSize: 14,
-    color: '#4CAF50',
-    fontWeight: '600',
-  },
-  placeholder: {
-    width: 44,
+  statusText: {
+    fontSize: theme.fonts.sizes.md,
+    fontWeight: theme.fonts.weights.medium,
   },
   content: {
     flex: 1,
+    backgroundColor: theme.colors.white,
+    borderTopLeftRadius: theme.borderRadius.xxxl,
+    borderTopRightRadius: theme.borderRadius.xxxl,
+    paddingTop: theme.spacing.xxxxxl,
+    paddingHorizontal: theme.spacing.screenPadding,
     justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 40,
   },
-  callInfo: {
+  avatarSection: {
     alignItems: 'center',
-    flex: 1,
-    justifyContent: 'center',
-  },
-  avatarContainer: {
-    marginBottom: 40,
   },
   avatar: {
-    alignItems: 'center',
-    justifyContent: 'center',
+    marginBottom: theme.spacing.xl,
   },
-  avatarRing: {
-    width: 180,
-    height: 180,
-    borderRadius: 90,
-    backgroundColor: '#FFF4F0',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 4,
-    borderColor: '#FF6B35',
-    shadowColor: '#FF6B35',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.2,
-    shadowRadius: 20,
-    elevation: 12,
+  avatarActive: {
+    transform: [{ scale: 1.05 }],
   },
-  avatarText: {
-    fontSize: 80,
+  participantName: {
+    fontSize: theme.fonts.sizes.xxl,
+    fontWeight: theme.fonts.weights.bold,
+    color: theme.colors.textPrimary,
+    marginBottom: theme.spacing.sm,
+  },
+  loadingContainer: {
+    marginTop: theme.spacing.md,
+  },
+  durationSection: {
+    alignItems: 'center',
+    marginVertical: theme.spacing.xxxl,
   },
   duration: {
-    fontSize: 48,
-    fontWeight: '300',
-    color: '#2C2C2C',
-    marginBottom: 12,
-    letterSpacing: 2,
+    fontSize: theme.fonts.sizes.display3,
+    fontWeight: theme.fonts.weights.light,
+    color: theme.colors.textPrimary,
+    letterSpacing: 3,
+    marginBottom: theme.spacing.sm,
   },
-  callSubtext: {
-    fontSize: 16,
-    color: '#666666',
-    fontWeight: '500',
+  rateText: {
+    fontSize: theme.fonts.sizes.md,
+    color: theme.colors.textSecondary,
+    fontWeight: theme.fonts.weights.medium,
   },
-  controlsContainer: {
+  errorContainer: {
+    backgroundColor: theme.colors.errorLight,
+    borderRadius: theme.borderRadius.lg,
+    padding: theme.spacing.md,
+    marginVertical: theme.spacing.md,
     alignItems: 'center',
-    paddingBottom: 20,
   },
-  topControls: {
+  errorText: {
+    fontSize: theme.fonts.sizes.md,
+    color: theme.colors.error,
+    textAlign: 'center',
+    marginBottom: theme.spacing.sm,
+  },
+  dismissButton: {
+    minWidth: 80,
+  },
+  controlsSection: {
+    paddingBottom: theme.spacing.xxxl,
+  },
+  audioControls: {
     flexDirection: 'row',
-    gap: 40,
-    marginBottom: 40,
+    justifyContent: 'space-around',
+    marginBottom: theme.spacing.xxxl,
   },
   controlButton: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: '#FFFFFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: '#F0F0F0',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
-    elevation: 6,
-  },
-  mutedButton: {
-    backgroundColor: '#FFE8E8',
-    borderColor: '#FF6B6B',
-  },
-  speakerOnButton: {
-    backgroundColor: '#FFF4F0',
-    borderColor: '#FF6B35',
-  },
-  controlButtonText: {
-    fontSize: 32,
-    marginBottom: 4,
-  },
-  controlButtonLabel: {
-    fontSize: 12,
-    color: '#666666',
-    fontWeight: '600',
-    textAlign: 'center',
+    minWidth: 120,
   },
   endCallButton: {
-    alignItems: 'center',
-  },
-  endCallButtonInner: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: '#FF6B35',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#FF6B35',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.3,
-    shadowRadius: 16,
-    elevation: 8,
-  },
-  endCallButtonText: {
-    fontSize: 32,
-    transform: [{ rotate: '135deg' }],
-  },
-  endCallLabel: {
-    fontSize: 14,
-    color: '#FF6B35',
-    fontWeight: '600',
-    marginTop: 8,
-  },
-  footer: {
-    paddingHorizontal: 24,
-    paddingVertical: 20,
-    backgroundColor: '#F8F9FA',
-    gap: 12,
-  },
-  costCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 3,
-    borderWidth: 1,
-    borderColor: '#F0F0F0',
-  },
-  costIcon: {
-    fontSize: 24,
-    marginRight: 12,
-  },
-  costAmount: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#FF6B35',
-  },
-  costLabel: {
-    fontSize: 12,
-    color: '#666666',
-    fontWeight: '500',
-  },
-  bonusCard: {
-    backgroundColor: '#E8F7ED',
-    borderRadius: 12,
-    padding: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#4CAF50',
-  },
-  bonusIcon: {
-    fontSize: 16,
-    marginRight: 8,
-  },
-  bonusText: {
-    fontSize: 14,
-    color: '#4CAF50',
-    fontWeight: '600',
+    marginHorizontal: theme.spacing.xxxl,
   },
 });
 
-export default CallScreen;
+export default React.memo(CallScreen);

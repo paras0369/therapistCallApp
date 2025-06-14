@@ -14,7 +14,7 @@ import UserTypeSelection from './src/components/UserTypeSelection';
 import LoginScreen from './src/components/LoginScreen';
 import UserDashboard from './src/components/UserDashboard';
 import TherapistDashboard from './src/components/TherapistDashboard';
-import MinimalCallScreen from './src/components/MinimalCallScreen';
+import CallScreen from './src/components/CallScreen';
 
 // Theme
 import theme from './src/theme';
@@ -24,9 +24,9 @@ const Stack = createStackNavigator();
 // Error fallback component
 const AppErrorFallback = ({ error, onRetry }) => (
   <View style={styles.errorContainer}>
-    <LoadingState 
-      type="network" 
-      text="App Error Occurred" 
+    <LoadingState
+      type="network"
+      text="App Error Occurred"
       subtext="Please restart the app to continue"
     />
   </View>
@@ -39,9 +39,9 @@ const AppNavigator = () => {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <LoadingState 
-          type="auth" 
-          text="Loading..." 
+        <LoadingState
+          type="auth"
+          text="Loading..."
           subtext="Checking authentication status"
         />
       </View>
@@ -72,7 +72,7 @@ const AppNavigator = () => {
         />
         <Stack.Screen
           name="CallScreen"
-          component={MinimalCallScreen}
+          component={CallScreen}
           options={{
             gestureEnabled: false,
           }}

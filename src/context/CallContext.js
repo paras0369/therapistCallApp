@@ -54,9 +54,6 @@ const initialState = {
   currentTherapist: null,
   loading: false,
   error: null,
-  isProcessingCall: false, // Prevent multiple call requests
-  lastIncomingCallId: null, // Track last incoming call to prevent duplicates
-  hasActiveIncomingCall: false, // Flag to prevent multiple incoming calls
 };
 
 // Reducer
@@ -72,7 +69,6 @@ const callReducer = (state, action) => {
         ...state,
         callState: action.payload,
         isCallActive: action.payload === CALL_STATES.ACTIVE,
-        isProcessingCall: action.payload === CALL_STATES.INITIATING || action.payload === CALL_STATES.ENDING,
       };
     case CALL_ACTIONS.SET_CONNECTION_STATE:
       return {
@@ -94,14 +90,12 @@ const callReducer = (state, action) => {
       return {
         ...state,
         incomingCall: action.payload,
-        lastIncomingCallId: action.payload?.callId,
-        hasActiveIncomingCall: true,
+        currentCallId: action.payload?.callId,
       };
     case CALL_ACTIONS.CLEAR_INCOMING_CALL:
       return {
         ...state,
         incomingCall: null,
-        hasActiveIncomingCall: false,
       };
     case CALL_ACTIONS.SET_CURRENT_THERAPIST:
       return {
@@ -122,8 +116,6 @@ const callReducer = (state, action) => {
     case CALL_ACTIONS.RESET_CALL:
       return {
         ...initialState,
-        // Clear lastIncomingCallId after call ends to allow fresh calls
-        lastIncomingCallId: null,
       };
     default:
       return state;
@@ -181,23 +173,15 @@ export const CallProvider = ({ children }) => {
     CallService.setOnIncomingCall((data) => {
       const currentState = stateRef.current;
       
-      // Prevent duplicate incoming calls
-      if (currentState.hasActiveIncomingCall || currentState.lastIncomingCallId === data.callId) {
-        console.log('Ignoring duplicate incoming call:', data.callId);
-        return;
-      }
-
-      // Only accept incoming calls if we're in idle state or just ended a call
-      if (currentState.callState !== CALL_STATES.IDLE && currentState.callState !== CALL_STATES.ENDED) {
-        console.log('Rejecting incoming call - already in call state:', currentState.callState);
+      // Only accept incoming calls if we're in idle state or if we're the ones making the call
+      // Don't reject calls when in 'ended' state as this is a transitional state
+      if (currentState.callState !== CALL_STATES.IDLE && 
+          currentState.callState !== CALL_STATES.ENDED &&
+          currentState.callState !== CALL_STATES.INITIATING &&
+          currentState.callState !== CALL_STATES.RINGING) {
+        console.log('Rejecting incoming call - already in active call:', currentState.callState);
         CallService.rejectCall(data.callId);
         return;
-      }
-
-      // If we're in ENDED state, reset first before accepting incoming call
-      if (currentState.callState === CALL_STATES.ENDED) {
-        console.log('Resetting state before accepting incoming call');
-        dispatch({ type: CALL_ACTIONS.RESET_CALL });
       }
 
       dispatch({
@@ -215,27 +199,23 @@ export const CallProvider = ({ children }) => {
 
     // Call rejected listener
     CallService.setOnCallRejected((data) => {
-      console.log('Call rejected event received:', data);
+      console.log('Call rejected:', data);
       dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
-      dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ENDED });
-      // Reset immediately to prevent blocking subsequent calls
-      setTimeout(() => {
-        console.log('Resetting call state after rejection');
-        dispatch({ type: CALL_ACTIONS.RESET_CALL });
-      }, 100);
+      // Reset immediately for rejected calls to allow new calls - skip ENDED state
+      console.log('Resetting call state immediately after rejection');
+      dispatch({ type: CALL_ACTIONS.RESET_CALL });
     });
 
-    // Call ended listener - ensures both parties are disconnected
+    // Call ended listener
     CallService.setOnCallEnded((data) => {
-      console.log('Call ended event received:', data);
+      console.log('Call ended:', data);
       dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
       dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ENDED });
       dispatch({ type: CALL_ACTIONS.SET_CONNECTION_STATE, payload: CONNECTION_STATES.DISCONNECTED });
-      // Auto reset after call ends - reduced timeout to match rejection handling
       setTimeout(() => {
         console.log('Resetting call state after call ended');
         dispatch({ type: CALL_ACTIONS.RESET_CALL });
-      }, 1000);
+      }, 500);
     });
 
     // Remote stream received listener
@@ -245,56 +225,79 @@ export const CallProvider = ({ children }) => {
     });
 
     // ICE connection state change listener
-    CallService.setOnIceConnectionStateChange((connectionState) => {
+    CallService.setOnIceConnectionStateChange((iceState) => {
+      const connectionState = mapIceStateToConnectionState(iceState);
       dispatch({ type: CALL_ACTIONS.SET_CONNECTION_STATE, payload: connectionState });
       
-      if (connectionState === CONNECTION_STATES.CONNECTED) {
+      if (iceState === 'connected' || iceState === 'completed') {
         dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ACTIVE });
-      } else if (connectionState === CONNECTION_STATES.FAILED || connectionState === CONNECTION_STATES.DISCONNECTED) {
+      } else if (iceState === 'failed') {
+        dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ERROR });
+      }
+    });
+
+    // Connection state change listener
+    CallService.setOnConnectionStateChange((state) => {
+      if (state === 'failed' || state === 'disconnected') {
         dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ERROR });
       }
     });
   }, []);
 
+  // Helper function to map ICE states to our connection states
+  const mapIceStateToConnectionState = (iceState) => {
+    switch (iceState) {
+      case 'new':
+        return CONNECTION_STATES.NEW;
+      case 'checking':
+        return CONNECTION_STATES.CONNECTING;
+      case 'connected':
+      case 'completed':
+        return CONNECTION_STATES.CONNECTED;
+      case 'disconnected':
+        return CONNECTION_STATES.DISCONNECTED;
+      case 'failed':
+        return CONNECTION_STATES.FAILED;
+      case 'closed':
+        return CONNECTION_STATES.CLOSED;
+      default:
+        return CONNECTION_STATES.NEW;
+    }
+  };
+
   // Actions
   const startCall = async (therapistId, therapistName) => {
-    console.log('StartCall called with state:', state.callState, 'isProcessingCall:', state.isProcessingCall);
+    console.log('StartCall called with state:', state.callState);
     
-    // Allow calls when state is IDLE, ENDED, or ERROR - but prevent multiple simultaneous calls
-    if (state.isProcessingCall && state.callState === CALL_STATES.INITIATING) {
-      console.log('Call already in progress, ignoring request');
-      return { success: false, error: 'Call already in progress' };
+    // Always reset state before starting a new call, regardless of current state
+    console.log('Resetting call state before new call, current state:', state.callState);
+    
+    // Reset both service and context state
+    if (CallService.currentCallId) {
+      CallService.resetCallState();
     }
+    dispatch({ type: CALL_ACTIONS.RESET_CALL });
+    
+    // Wait for state to properly reset
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     try {
-      const wasEnded = state.callState === CALL_STATES.ENDED;
-      const wasError = state.callState === CALL_STATES.ERROR;
-      
-      // Always reset call state if coming from ENDED or ERROR state
-      if (wasEnded || wasError || state.callState !== CALL_STATES.IDLE) {
-        console.log('Resetting call state before new call attempt');
-        dispatch({ type: CALL_ACTIONS.RESET_CALL });
-        // Wait a bit for the reset to propagate
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      
-      // Clear any previous errors and set therapist info first  
+      // Clear any previous errors and set therapist info
       dispatch({ type: CALL_ACTIONS.CLEAR_ERROR });
       dispatch({ 
         type: CALL_ACTIONS.SET_CURRENT_THERAPIST, 
         payload: { id: therapistId, name: therapistName } 
       });
       
-      // Then set call state to initiating
-      console.log('Setting call state to INITIATING');
+      // Set call state to initiating
       dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.INITIATING });
       
       const result = await CallService.startCall(therapistId);
       
       if (result.success) {
-        console.log('Call started successfully, setting state to RINGING');
+        console.log('Call started successfully');
         dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.RINGING });
-        return { success: true, wasReset: wasEnded || wasError };
+        return { success: true };
       } else {
         console.log('Call start failed:', result.error);
         dispatch({
@@ -322,10 +325,11 @@ export const CallProvider = ({ children }) => {
       
       const result = await CallService.acceptCall(callId);
       
+      dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: false });
+      
       if (result.success) {
         dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
         dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.CONNECTING });
-        dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: false });
         return { success: true };
       } else {
         dispatch({
@@ -336,6 +340,7 @@ export const CallProvider = ({ children }) => {
       }
     } catch (error) {
       console.error('Accept call error:', error);
+      dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: false });
       dispatch({
         type: CALL_ACTIONS.SET_ERROR,
         payload: 'An unexpected error occurred while accepting the call',
@@ -351,17 +356,13 @@ export const CallProvider = ({ children }) => {
   };
 
   const endCall = () => {
-    // Prevent multiple end call requests
     if (state.callState === CALL_STATES.ENDING || state.callState === CALL_STATES.ENDED) {
       return;
     }
 
-    console.log('Ending call, setting state to ENDING');
+    console.log('Ending call');
     dispatch({ type: CALL_ACTIONS.SET_CALL_STATE, payload: CALL_STATES.ENDING });
     CallService.endCall();
-    
-    // Don't reset here - let the socket handler manage the state transition
-    // The CallService.setOnCallEnded listener will handle the reset
   };
 
   const toggleMute = () => {
@@ -396,6 +397,11 @@ export const CallProvider = ({ children }) => {
   };
 
   const resetCall = () => {
+    console.log('Manually resetting call state');
+    // Also reset the service state
+    if (CallService.currentCallId) {
+      CallService.resetCallState();
+    }
     dispatch({ type: CALL_ACTIONS.RESET_CALL });
   };
 

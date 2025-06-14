@@ -19,7 +19,6 @@ import theme from '../theme';
 // Existing imports
 import { API_ENDPOINTS } from '../config/api';
 import AuthService from '../services/AuthService';
-import DialingModal from './DialingModal';
 
 const UserDashboard = ({ navigation }) => {
   // Local state
@@ -27,8 +26,6 @@ const UserDashboard = ({ navigation }) => {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [userProfile, setUserProfile] = useState(null);
-  const [showDialingModal, setShowDialingModal] = useState(false);
-  const [currentTherapist, setCurrentTherapist] = useState(null);
 
   // Context hooks
   const { user, logout } = useAuth();
@@ -42,24 +39,36 @@ const UserDashboard = ({ navigation }) => {
   useEffect(() => {
     if (incomingCall) {
       Alert.alert('Incoming Call', `Call from ${incomingCall.therapistName}`, [
-        { text: 'Decline', onPress: () => handleRejectCall(incomingCall.callId) },
-        { text: 'Accept', onPress: () => handleAcceptCall(incomingCall.callId) },
+        {
+          text: 'Decline',
+          onPress: () => handleRejectCall(incomingCall.callId),
+        },
+        {
+          text: 'Accept',
+          onPress: () => handleAcceptCall(incomingCall.callId),
+        },
       ]);
     }
   }, [incomingCall]);
 
-  const handleAcceptCall = useCallback(async (callId) => {
-    const result = await acceptCall(callId);
-    if (result.success) {
-      navigation.navigate('CallScreen');
-    } else {
-      Alert.alert('Error', result.error || 'Failed to accept call');
-    }
-  }, [acceptCall, navigation]);
+  const handleAcceptCall = useCallback(
+    async callId => {
+      const result = await acceptCall(callId);
+      if (result.success) {
+        navigation.navigate('CallScreen');
+      } else {
+        Alert.alert('Error', result.error || 'Failed to accept call');
+      }
+    },
+    [acceptCall, navigation],
+  );
 
-  const handleRejectCall = useCallback((callId) => {
-    rejectCall(callId);
-  }, [rejectCall]);
+  const handleRejectCall = useCallback(
+    callId => {
+      rejectCall(callId);
+    },
+    [rejectCall],
+  );
 
   const loadData = useCallback(async () => {
     try {
@@ -88,42 +97,34 @@ const UserDashboard = ({ navigation }) => {
     loadData();
   }, [loadData]);
 
-  const handleStartCall = useCallback(async (therapistId, therapistName) => {
-    if (userProfile.coins < 6) {
-      Alert.alert(
-        'Insufficient Coins',
-        'You need at least 6 coins to start a call',
-      );
-      return;
-    }
+  const handleStartCall = useCallback(
+    async (therapistId, therapistName) => {
+      if (userProfile.coins < 6) {
+        Alert.alert(
+          'Insufficient Coins',
+          'You need at least 6 coins to start a call',
+        );
+        return;
+      }
 
-    Alert.alert('Start Call', `Call ${therapistName}? (6 coins per minute)`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Call',
-        onPress: async () => {
-          const result = await startCall(therapistId, therapistName);
-          if (!result.success) {
-            Alert.alert('Error', result.error || 'Failed to start call');
-          } else {
-            // If state was reset, add small delay to ensure clean state
-            if (result.wasReset) {
-              setTimeout(() => {
-                navigation.navigate('CallScreen');
-              }, 200);
+      Alert.alert('Start Call', `Call ${therapistName}? (6 coins per minute)`, [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Call',
+          onPress: async () => {
+            const result = await startCall(therapistId, therapistName);
+            if (!result.success) {
+              Alert.alert('Error', result.error || 'Failed to start call');
             } else {
               navigation.navigate('CallScreen');
             }
-          }
+          },
         },
-      },
-    ]);
-  }, [userProfile, startCall, navigation]);
+      ]);
+    },
+    [userProfile, startCall, navigation],
+  );
 
-  const cancelCall = useCallback(() => {
-    setShowDialingModal(false);
-    setCurrentTherapist(null);
-  }, []);
 
   const handleLogout = useCallback(async () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
@@ -138,51 +139,54 @@ const UserDashboard = ({ navigation }) => {
     ]);
   }, [logout, navigation]);
 
-  const renderTherapist = useCallback(({ item }) => (
-    <Card 
-      style={styles.therapistCard}
-      onPress={() => handleStartCall(item._id, item.name)}
-      shadow="md"
-    >
-      <View style={styles.therapistHeader}>
-        <Avatar 
-          size="xl"
-          emoji="👨‍⚕️"
-          backgroundColor={theme.colors.primaryLight}
-        />
-        <View style={styles.statusBadge}>
-          <View style={styles.onlineIndicator} />
-          <Text style={styles.statusText}>Available</Text>
-        </View>
-      </View>
-      
-      <View style={styles.therapistInfo}>
-        <Text style={styles.therapistName}>{item.name}</Text>
-        <Text style={styles.therapistSpecialization}>
-          {item.specialization}
-        </Text>
-        <View style={styles.therapistMeta}>
-          <Text style={styles.ratingText}>⭐ 4.8 Rating</Text>
-          <Text style={styles.sessionText}>6 coins/min</Text>
-        </View>
-      </View>
-
-      <Button
-        title="Start Call"
-        variant="primary"
-        size="medium"
-        style={styles.callButton}
+  const renderTherapist = useCallback(
+    ({ item }) => (
+      <Card
+        style={styles.therapistCard}
         onPress={() => handleStartCall(item._id, item.name)}
-      />
-    </Card>
-  ), [handleStartCall]);
+        shadow="md"
+      >
+        <View style={styles.therapistHeader}>
+          <Avatar
+            size="xl"
+            emoji="👨‍⚕️"
+            backgroundColor={theme.colors.primaryLight}
+          />
+          <View style={styles.statusBadge}>
+            <View style={styles.onlineIndicator} />
+            <Text style={styles.statusText}>Available</Text>
+          </View>
+        </View>
+
+        <View style={styles.therapistInfo}>
+          <Text style={styles.therapistName}>{item.name}</Text>
+          <Text style={styles.therapistSpecialization}>
+            {item.specialization}
+          </Text>
+          <View style={styles.therapistMeta}>
+            <Text style={styles.ratingText}>⭐ 4.8 Rating</Text>
+            <Text style={styles.sessionText}>6 coins/min</Text>
+          </View>
+        </View>
+
+        <Button
+          title="Start Call"
+          variant="primary"
+          size="medium"
+          style={styles.callButton}
+          onPress={() => handleStartCall(item._id, item.name)}
+        />
+      </Card>
+    ),
+    [handleStartCall],
+  );
 
   if (loading) {
     return (
       <SafeAreaView style={styles.container}>
-        <LoadingState 
-          type="data" 
-          text="Loading dashboard..." 
+        <LoadingState
+          type="data"
+          text="Loading dashboard..."
           subtext="Fetching available therapists"
         />
       </SafeAreaView>
@@ -194,7 +198,7 @@ const UserDashboard = ({ navigation }) => {
       <View style={styles.header}>
         <View style={styles.headerTop}>
           <View style={styles.userInfo}>
-            <Avatar 
+            <Avatar
               size="lg"
               emoji="👤"
               backgroundColor={theme.colors.primary}
@@ -211,7 +215,7 @@ const UserDashboard = ({ navigation }) => {
             onPress={handleLogout}
           />
         </View>
-        
+
         <View style={styles.statsContainer}>
           <Card variant="primary" style={styles.coinsCard}>
             <Text style={styles.coinsIcon}>💰</Text>
@@ -226,12 +230,14 @@ const UserDashboard = ({ navigation }) => {
       <View style={styles.content}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Available Therapists</Text>
-          <Text style={styles.sectionSubtitle}>Find the perfect match for your needs</Text>
+          <Text style={styles.sectionSubtitle}>
+            Find the perfect match for your needs
+          </Text>
         </View>
 
         {therapists.length === 0 ? (
           <View style={styles.emptyContainer}>
-            <Avatar 
+            <Avatar
               size="xxxxl"
               emoji="👨‍⚕️"
               backgroundColor={theme.colors.primaryLight}
@@ -239,7 +245,8 @@ const UserDashboard = ({ navigation }) => {
             />
             <Text style={styles.emptyTitle}>No Therapists Available</Text>
             <Text style={styles.emptyText}>
-              All therapists are currently busy. Please try again in a few minutes.
+              All therapists are currently busy. Please try again in a few
+              minutes.
             </Text>
             <Button
               title="Refresh List"
@@ -256,8 +263,8 @@ const UserDashboard = ({ navigation }) => {
               item._id?.toString() || `therapist-${index}`
             }
             refreshControl={
-              <RefreshControl 
-                refreshing={refreshing} 
+              <RefreshControl
+                refreshing={refreshing}
                 onRefresh={onRefresh}
                 tintColor={theme.colors.primary}
                 colors={[theme.colors.primary]}
@@ -269,11 +276,6 @@ const UserDashboard = ({ navigation }) => {
         )}
       </View>
 
-      <DialingModal
-        visible={showDialingModal}
-        therapistName={currentTherapist?.name || 'Therapist'}
-        onCancel={cancelCall}
-      />
     </SafeAreaView>
   );
 };
@@ -447,11 +449,11 @@ const styles = StyleSheet.create({
 });
 
 // Error fallback for UserDashboard
-const UserDashboardErrorFallback = ({ error, onRetry }) => (
+const UserDashboardErrorFallback = () => (
   <SafeAreaView style={styles.container}>
-    <LoadingState 
-      type="network" 
-      text="Dashboard Error" 
+    <LoadingState
+      type="network"
+      text="Dashboard Error"
       subtext="Unable to load therapist list. Please try again."
     />
   </SafeAreaView>
