@@ -27,6 +27,7 @@ const TherapistDashboard = ({ navigation }) => {
   const [therapistProfile, setTherapistProfile] = useState(null);
   const [callHistory, setCallHistory] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [currentCallId, setCurrentCallId] = useState(null); // Track current call alert
 
   // Context hooks
   const { user, logout } = useAuth();
@@ -38,17 +39,49 @@ const TherapistDashboard = ({ navigation }) => {
 
   // Handle incoming calls
   useEffect(() => {
-    if (incomingCall) {
-      Alert.alert(
-        'Incoming Call',
-        `Call from ${incomingCall.participantName}`,
-        [
-          { text: 'Decline', onPress: () => handleRejectCall(incomingCall.callId) },
-          { text: 'Accept', onPress: () => handleAcceptCall(incomingCall.callId) },
-        ]
-      );
+    if (incomingCall && incomingCall.callId !== currentCallId) {
+      // Prevent multiple alerts for the same call
+      if (currentCallId) {
+        console.log('TherapistDashboard: Ignoring duplicate call alert for:', incomingCall.callId, 'Current:', currentCallId);
+        return;
+      }
+
+      // New incoming call - show alert
+      console.log('TherapistDashboard: Showing alert for call:', incomingCall.callId);
+      setCurrentCallId(incomingCall.callId);
+      
+      // Use setTimeout to ensure state update is processed
+      setTimeout(() => {
+        Alert.alert(
+          'Incoming Call',
+          `Call from ${incomingCall.participantName}`,
+          [
+            { 
+              text: 'Decline', 
+              onPress: () => {
+                console.log('TherapistDashboard: Declining call:', incomingCall.callId);
+                handleRejectCall(incomingCall.callId);
+                setCurrentCallId(null);
+              }
+            },
+            { 
+              text: 'Accept', 
+              onPress: () => {
+                console.log('TherapistDashboard: Accepting call:', incomingCall.callId);
+                handleAcceptCall(incomingCall.callId);
+                setCurrentCallId(null);
+              }
+            },
+          ],
+          { cancelable: false } // Prevents dismissing by tapping outside
+        );
+      }, 100);
+    } else if (!incomingCall && currentCallId) {
+      // Incoming call was cleared (cancelled) - reset tracking
+      console.log('TherapistDashboard: Clearing call tracking for:', currentCallId);
+      setCurrentCallId(null);
     }
-  }, [incomingCall]);
+  }, [incomingCall, currentCallId]);
 
   const handleAcceptCall = useCallback(async (callId) => {
     const result = await acceptCall(callId);

@@ -18,6 +18,7 @@ export const CALL_MANAGER_EVENTS = {
   INCOMING_CALL: 'incoming_call',
   CALL_CONNECTED: 'call_connected',
   CALL_ENDED: 'call_ended',
+  CALL_CANCELLED: 'call_cancelled',
   ERROR: 'error',
   DEBUG: 'debug',
 };
@@ -149,6 +150,10 @@ class CallManager {
     );
 
     // Socket service listeners
+    this.socketService.on(SOCKET_EVENTS.CALL_INITIATED, data => {
+      this.handleCallInitiated(data);
+    });
+
     this.socketService.on(SOCKET_EVENTS.CALL_REQUEST, data => {
       this.handleIncomingCall(data);
     });
@@ -163,6 +168,10 @@ class CallManager {
 
     this.socketService.on(SOCKET_EVENTS.CALL_ENDED, data => {
       this.handleCallEnded(data);
+    });
+
+    this.socketService.on(SOCKET_EVENTS.CALL_CANCELLED, data => {
+      this.handleCallCancelled(data);
     });
 
     this.socketService.on(SOCKET_EVENTS.OFFER, data => {
@@ -218,6 +227,12 @@ class CallManager {
 
       if (!this.isInitialized) {
         throw new Error('CallManager not initialized');
+      }
+
+      // Prevent concurrent call initiation
+      if (this.currentOperation === 'starting_call') {
+        console.log('CallManager: Call initiation already in progress, ignoring duplicate request');
+        throw new Error('Call initiation already in progress');
       }
 
       // Validate that only users can start calls
@@ -428,7 +443,13 @@ class CallManager {
         if (!endResult.success) {
           console.warn('CallManager: Failed to notify server of call end:', endResult.error);
           // Continue anyway since we still want to clean up locally
+        } else {
+          console.log('CallManager: Successfully notified server of call end');
         }
+        
+        // Add a small delay to ensure the server processes the end-call event
+        // before any potential socket disconnection
+        await new Promise(resolve => setTimeout(resolve, 100));
       } else {
         console.log('CallManager: No callId available, skipping server notification');
       }
@@ -495,6 +516,23 @@ class CallManager {
   }
 
   /**
+   * Handle call initiated confirmation
+   */
+  async handleCallInitiated(data) {
+    try {
+      console.log('CallManager: Call initiated confirmation:', data);
+      
+      // Update the callId with the real server-provided one (replacing temporary ID)
+      if (data.callId) {
+        this.stateMachine.setCallData({ callId: data.callId });
+        console.log('CallManager: Updated callId from temp to server ID:', data.callId);
+      }
+    } catch (error) {
+      console.error('CallManager: Error handling call initiated:', error);
+    }
+  }
+
+  /**
    * Handle incoming call
    */
   async handleIncomingCall(data) {
@@ -506,6 +544,40 @@ class CallManager {
       if (userType !== 'therapist') {
         console.log(
           'CallManager: Ignoring call request - user is not a therapist',
+        );
+        return;
+      }
+
+      // Check if this is our own call (therapist receiving their own call request)
+      const currentUserId = await AuthService.getUserId();
+      if (data.userId === currentUserId) {
+        console.log(
+          'CallManager: Ignoring call request - this is our own call',
+          data.callId,
+          'Current user:', currentUserId,
+          'Call from user:', data.userId
+        );
+        return;
+      }
+
+      // Additional check: if we're currently in a call state other than idle, 
+      // we shouldn't receive new calls
+      const currentState = this.stateMachine.getState();
+      if (currentState !== CALL_STATES.IDLE) {
+        console.log(
+          'CallManager: Ignoring call request - already in call state:',
+          currentState,
+          'Call:', data.callId
+        );
+        return;
+      }
+
+      // Check if we already processed this call ID
+      const currentCallData = this.stateMachine.getCallData();
+      if (currentCallData.callId === data.callId) {
+        console.log(
+          'CallManager: Ignoring duplicate call request for same callId:',
+          data.callId
         );
         return;
       }
@@ -620,6 +692,27 @@ class CallManager {
       callId: data.callId,
       reason: data.reason,
       endedBy: data.endedBy,
+    });
+  }
+
+  /**
+   * Handle call cancelled
+   */
+  async handleCallCancelled(data) {
+    console.log('CallManager: Call cancelled:', data);
+
+    // Emit a specific event for UI components to handle call cancellation
+    this.emit(CALL_MANAGER_EVENTS.CALL_CANCELLED, {
+      callId: data.callId,
+      reason: data.reason,
+      cancelledBy: data.cancelledBy,
+    });
+
+    // Transition to cancelled state
+    await this.stateMachine.handleEvent(CALL_EVENTS.CALL_ENDED, {
+      callId: data.callId,
+      reason: data.reason,
+      endedBy: data.cancelledBy,
     });
   }
 

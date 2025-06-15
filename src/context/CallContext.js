@@ -6,6 +6,7 @@
  */
 
 import React, { createContext, useContext, useReducer, useEffect, useCallback, useRef } from 'react';
+import { Alert } from 'react-native';
 import CallManager, { CALL_MANAGER_EVENTS, ERROR_TYPES } from '../services/CallManager';
 import { CALL_STATES } from '../services/CallStateMachine';
 import { useAuth } from './AuthContext';
@@ -186,7 +187,14 @@ export const CallProvider = ({ children }) => {
   const initializeCallManager = useCallback(async () => {
     // Prevent multiple initialization attempts
     if (initializationPromiseRef.current) {
+      console.log('CallContext: Initialization already in progress, returning existing promise');
       return initializationPromiseRef.current;
+    }
+
+    // Check if already initialized
+    if (state.isInitialized && callManagerRef.current) {
+      console.log('CallContext: CallManager already initialized');
+      return { success: true };
     }
 
     try {
@@ -293,6 +301,21 @@ export const CallProvider = ({ children }) => {
       updateConnectionStatus();
     });
 
+    // Call cancelled
+    manager.on(CALL_MANAGER_EVENTS.CALL_CANCELLED, (event) => {
+      console.log('CallContextV2: Call cancelled:', event);
+      dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
+      
+      // Show alert notification for call cancellation
+      Alert.alert(
+        'Call Cancelled',
+        `${event.reason.charAt(0).toUpperCase() + event.reason.slice(1)}`,
+        [{ text: 'OK', style: 'default' }]
+      );
+      
+      updateConnectionStatus();
+    });
+
     // Errors
     manager.on(CALL_MANAGER_EVENTS.ERROR, (error) => {
       console.error('CallContextV2: CallManager error:', error);
@@ -360,8 +383,16 @@ export const CallProvider = ({ children }) => {
     }
 
     try {
+      // Set loading state IMMEDIATELY to prevent race conditions
       dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: true });
       dispatch({ type: CALL_ACTIONS.CLEAR_ERROR });
+
+      // Double-check after setting loading state (for race condition protection)
+      if (state.isCallActive) {
+        console.log('CallContext: Call became active during loading state update');
+        dispatch({ type: CALL_ACTIONS.SET_LOADING, payload: false });
+        return { success: false, error: 'Call already in progress' };
+      }
 
       const result = await callManagerRef.current.startCall(therapistId, therapistName, callType);
       

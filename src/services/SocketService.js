@@ -29,6 +29,7 @@ export const SOCKET_EVENTS = {
   
   // Call signaling events
   INITIATE_CALL: 'initiate-call',
+  CALL_INITIATED: 'call-initiated',
   CALL_REQUEST: 'call-request',
   ACCEPT_CALL: 'accept-call',
   CALL_ACCEPTED: 'call-accepted',
@@ -36,6 +37,7 @@ export const SOCKET_EVENTS = {
   CALL_REJECTED: 'call-rejected',
   END_CALL: 'end-call',
   CALL_ENDED: 'call-ended',
+  CALL_CANCELLED: 'call-cancelled',
   
   // WebRTC signaling events
   OFFER: 'offer',
@@ -79,6 +81,18 @@ class SocketService {
   async connect() {
     try {
       console.log('SocketService: Connecting...');
+      
+      // Check if already connected
+      if (this.socket && this.socket.connected) {
+        console.log('SocketService: Already connected, returning existing connection');
+        return { success: true };
+      }
+
+      // Check if currently connecting
+      if (this.connectionState === SOCKET_STATES.CONNECTING) {
+        console.log('SocketService: Connection already in progress');
+        return { success: false, error: 'Connection already in progress' };
+      }
       
       // Get authentication data
       const token = await AuthService.getAuthToken();
@@ -226,6 +240,11 @@ class SocketService {
     });
 
     // Call signaling events - forward to listeners
+    this.socket.on(SOCKET_EVENTS.CALL_INITIATED, (data) => {
+      console.log('SocketService: Call initiated:', data);
+      this.emitToListeners(SOCKET_EVENTS.CALL_INITIATED, data);
+    });
+
     this.socket.on(SOCKET_EVENTS.CALL_REQUEST, (data) => {
       console.log('SocketService: Call request received:', data);
       this.emitToListeners(SOCKET_EVENTS.CALL_REQUEST, data);
@@ -244,6 +263,11 @@ class SocketService {
     this.socket.on(SOCKET_EVENTS.CALL_ENDED, (data) => {
       console.log('SocketService: Call ended:', data);
       this.emitToListeners(SOCKET_EVENTS.CALL_ENDED, data);
+    });
+
+    this.socket.on(SOCKET_EVENTS.CALL_CANCELLED, (data) => {
+      console.log('SocketService: Call cancelled:', data);
+      this.emitToListeners(SOCKET_EVENTS.CALL_CANCELLED, data);
     });
 
     // WebRTC signaling events
