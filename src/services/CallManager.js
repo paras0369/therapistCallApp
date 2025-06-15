@@ -275,7 +275,11 @@ class CallManager {
         throw new Error(initiateResult.error);
       }
 
-      console.log('CallManager: Call initiation sent');
+      // Generate a temporary callId for tracking - will be replaced with server's callId when call is accepted
+      const tempCallId = `temp_${Date.now()}_${therapistId}`;
+      this.stateMachine.setCallData({ callId: tempCallId });
+
+      console.log('CallManager: Call initiation sent with temp callId:', tempCallId);
       return { success: true };
     } catch (error) {
       console.error('CallManager: Start call failed:', error);
@@ -405,24 +409,32 @@ class CallManager {
   async endCall() {
     try {
       const callData = this.stateMachine.getCallData();
-      console.log(`CallManager: Ending call ${callData.callId}`);
+      console.log(`CallManager: Ending call ${callData.callId} in state ${this.stateMachine.getState()}`);
 
       // Clear any operation timeout since we're ending the call
       this.clearOperationTimeout();
       this.currentOperation = null;
-
-      // End in state machine
-      await this.stateMachine.handleEvent(CALL_EVENTS.END_CALL);
 
       // Calculate duration
       const duration = callData.startTime
         ? Math.ceil((Date.now() - callData.startTime) / 60000)
         : 0;
 
-      // Send end to server (don't wait for response)
+      // IMPORTANT: Send end to server FIRST before updating state machine
+      // This ensures other participants (like therapist) are notified immediately
       if (callData.callId) {
-        this.socketService.endCall(callData.callId, duration);
+        console.log('CallManager: Notifying server of call end before state change');
+        const endResult = this.socketService.endCall(callData.callId, duration);
+        if (!endResult.success) {
+          console.warn('CallManager: Failed to notify server of call end:', endResult.error);
+          // Continue anyway since we still want to clean up locally
+        }
+      } else {
+        console.log('CallManager: No callId available, skipping server notification');
       }
+
+      // End in state machine AFTER notifying server
+      await this.stateMachine.handleEvent(CALL_EVENTS.END_CALL);
 
       // Cleanup WebRTC
       await this.webrtcService.cleanup();
@@ -543,6 +555,12 @@ class CallManager {
     try {
       console.log('CallManager: Call accepted:', data);
 
+      // Update the callId with the real server-provided one (replacing temporary ID)
+      if (data.callId) {
+        this.stateMachine.setCallData({ callId: data.callId });
+        console.log('CallManager: Updated callId from temp to server ID:', data.callId);
+      }
+
       await this.stateMachine.handleEvent(CALL_EVENTS.CALL_ACCEPTED, {
         callId: data.callId,
       });
@@ -551,7 +569,6 @@ class CallManager {
       // The receiver (therapist) should wait for the offer
       const userType = await AuthService.getUserType();
       const webrtcStatus = this.webrtcService.getStatus();
-      const callData = this.stateMachine.getCallData();
 
       // Only users should initiate WebRTC, and only if we haven't already started
       if (
