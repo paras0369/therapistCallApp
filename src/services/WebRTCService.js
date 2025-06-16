@@ -12,6 +12,7 @@ import {
   RTCIceCandidate,
 } from 'react-native-webrtc';
 import { PermissionsAndroid, Platform, Alert } from 'react-native';
+import { WebRTCRetryManager } from '../utils/RetryManager';
 
 // WebRTC Connection States
 export const WEBRTC_STATES = {
@@ -57,6 +58,7 @@ class WebRTCService {
     // ICE candidate queue for early candidates
     this.iceCandidateQueue = [];
     this.isRemoteDescriptionSet = false;
+    this.maxQueueSize = 100; // Prevent unbounded queue growth
     
     // Event listeners
     this.listeners = new Map();
@@ -309,10 +311,13 @@ class WebRTCService {
 
       console.log('WebRTCService: Creating offer...');
       
-      const offer = await this.peerConnection.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: false,
-      });
+      const offer = await WebRTCRetryManager.execute(
+        () => this.peerConnection.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: false,
+        }),
+        'create offer'
+      );
 
       await this.peerConnection.setLocalDescription(offer);
       console.log('WebRTCService: Local description set (offer)');
@@ -342,10 +347,13 @@ class WebRTCService {
 
       console.log('WebRTCService: Creating answer...');
       
-      const answer = await this.peerConnection.createAnswer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: false,
-      });
+      const answer = await WebRTCRetryManager.execute(
+        () => this.peerConnection.createAnswer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: false,
+        }),
+        'create answer'
+      );
 
       await this.peerConnection.setLocalDescription(answer);
       console.log('WebRTCService: Local description set (answer)');
@@ -379,8 +387,34 @@ class WebRTCService {
 
       // Handle offer/offer collision (glare condition)
       if (this.peerConnection.signalingState === 'have-local-offer') {
-        console.log('WebRTCService: Offer/offer collision detected - ignoring remote offer');
-        return { success: true, answer: null };
+        console.log('WebRTCService: Offer/offer collision detected - implementing polite peer behavior');
+        
+        // Implement polite peer behavior: rollback and accept remote offer
+        try {
+          console.log('WebRTCService: Rolling back local offer to accept remote offer');
+          await this.peerConnection.setLocalDescription({type: 'rollback'});
+          
+          // Now process the remote offer
+          console.log('WebRTCService: Setting remote offer after rollback');
+          await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+          this.isRemoteDescriptionSet = true;
+          
+          // Process any queued ICE candidates
+          await this.processQueuedCandidates();
+          
+          // Create answer
+          const answer = await WebRTCRetryManager.execute(
+            () => this.peerConnection.createAnswer(),
+            'create answer after collision'
+          );
+          await this.peerConnection.setLocalDescription(answer);
+          
+          console.log('WebRTCService: Answer created after handling collision');
+          return { success: true, answer: answer };
+        } catch (rollbackError) {
+          console.error('WebRTCService: Failed to handle offer collision:', rollbackError);
+          return { success: false, error: rollbackError.message };
+        }
       }
 
       // For offers, we can handle them in 'stable' (initial) or 'have-remote-offer' states
@@ -463,6 +497,11 @@ class WebRTCService {
         await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
         console.log('WebRTCService: ICE candidate added');
       } else {
+        // Check queue size to prevent unbounded growth
+        if (this.iceCandidateQueue.length >= this.maxQueueSize) {
+          console.warn('WebRTCService: ICE candidate queue full, dropping oldest candidate');
+          this.iceCandidateQueue.shift(); // Remove oldest candidate
+        }
         console.log('WebRTCService: Queuing ICE candidate');
         this.iceCandidateQueue.push(candidate);
       }
@@ -487,13 +526,32 @@ class WebRTCService {
     const candidates = [...this.iceCandidateQueue];
     this.iceCandidateQueue = [];
     
-    for (const candidate of candidates) {
+    // Process candidates with timeout to prevent hanging
+    const candidatePromises = candidates.map(async (candidate) => {
       try {
-        await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        // Add timeout wrapper
+        const addCandidatePromise = this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('ICE candidate timeout')), 5000)
+        );
+        
+        await Promise.race([addCandidatePromise, timeoutPromise]);
         console.log('WebRTCService: Queued ICE candidate added');
       } catch (error) {
         console.error('WebRTCService: Failed to add queued ICE candidate:', error);
       }
+    });
+    
+    // Process all candidates concurrently with overall timeout
+    try {
+      const allCandidatesPromise = Promise.all(candidatePromises);
+      const overallTimeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Overall candidate processing timeout')), 10000)
+      );
+      
+      await Promise.race([allCandidatesPromise, overallTimeoutPromise]);
+    } catch (error) {
+      console.error('WebRTCService: Candidate processing timeout:', error);
     }
   }
 

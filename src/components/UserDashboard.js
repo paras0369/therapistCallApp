@@ -13,7 +13,7 @@ import axios from 'axios';
 
 // New imports
 import { useAuth, useCall } from '../context';
-import { Button, Card, Avatar, LoadingState, ErrorBoundary } from './common';
+import { Button, Card, Avatar, LoadingState, ErrorBoundary, StartCallModal } from './common';
 import theme from '../theme';
 
 // Existing imports
@@ -27,49 +27,19 @@ const UserDashboard = ({ navigation }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [userProfile, setUserProfile] = useState(null);
   const [startingCall, setStartingCall] = useState(false);
+  
+  // Modal states
+  const [showStartCallModal, setShowStartCallModal] = useState(false);
+  const [selectedTherapist, setSelectedTherapist] = useState(null);
 
   // Context hooks
   const { user, logout } = useAuth();
-  const { startCall, incomingCall, acceptCall, rejectCall } = useCall();
+  const { startCall } = useCall();
 
   useEffect(() => {
     loadData();
   }, []);
 
-  // Handle incoming calls
-  useEffect(() => {
-    if (incomingCall) {
-      Alert.alert('Incoming Call', `Call from ${incomingCall.therapistName}`, [
-        {
-          text: 'Decline',
-          onPress: () => handleRejectCall(incomingCall.callId),
-        },
-        {
-          text: 'Accept',
-          onPress: () => handleAcceptCall(incomingCall.callId),
-        },
-      ]);
-    }
-  }, [incomingCall]);
-
-  const handleAcceptCall = useCallback(
-    async callId => {
-      const result = await acceptCall(callId);
-      if (result.success) {
-        navigation.navigate('CallScreen');
-      } else {
-        Alert.alert('Error', result.error || 'Failed to accept call');
-      }
-    },
-    [acceptCall, navigation],
-  );
-
-  const handleRejectCall = useCallback(
-    callId => {
-      rejectCall(callId);
-    },
-    [rejectCall],
-  );
 
   const loadData = useCallback(async () => {
     try {
@@ -99,51 +69,55 @@ const UserDashboard = ({ navigation }) => {
   }, [loadData]);
 
   const handleStartCall = useCallback(
-    async (therapistId, therapistName) => {
+    async (therapistId, therapistName, therapistSpecialization) => {
       // Prevent duplicate calls
       if (startingCall) {
         console.log('Call already in progress, ignoring duplicate request');
         return;
       }
 
-      if (userProfile.coins < 6) {
-        Alert.alert(
-          'Insufficient Coins',
-          'You need at least 6 coins to start a call',
-        );
+      // Store therapist info and show modal
+      setSelectedTherapist({
+        id: therapistId,
+        name: therapistName,
+        specialization: therapistSpecialization
+      });
+      setShowStartCallModal(true);
+    },
+    [startingCall],
+  );
+
+  const handleConfirmCall = useCallback(
+    async () => {
+      if (!selectedTherapist || startingCall) {
         return;
       }
-
-      Alert.alert('Start Call', `Call ${therapistName}? (6 coins per minute)`, [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Call',
-          onPress: async () => {
-            if (startingCall) {
-              console.log('Call already in progress, ignoring');
-              return;
-            }
-            
-            setStartingCall(true);
-            try {
-              const result = await startCall(therapistId, therapistName);
-              if (!result.success) {
-                Alert.alert('Error', result.error || 'Failed to start call');
-              } else {
-                navigation.navigate('CallScreen');
-              }
-            } catch (error) {
-              console.error('Start call error:', error);
-              Alert.alert('Error', 'Failed to start call');
-            } finally {
-              setStartingCall(false);
-            }
-          },
-        },
-      ]);
+      
+      setStartingCall(true);
+      setShowStartCallModal(false);
+      
+      try {
+        const result = await startCall(selectedTherapist.id, selectedTherapist.name);
+        if (!result.success) {
+          Alert.alert('Error', result.error || 'Failed to start call');
+        } else {
+          navigation.navigate('CallScreen');
+        }
+      } catch (error) {
+        console.error('Start call error:', error);
+        Alert.alert('Error', 'Failed to start call');
+      } finally {
+        setStartingCall(false);
+        setSelectedTherapist(null);
+      }
     },
-    [userProfile, startCall, navigation, startingCall],
+    [selectedTherapist, startCall, navigation, startingCall],
   );
+
+  const handleCancelCall = useCallback(() => {
+    setShowStartCallModal(false);
+    setSelectedTherapist(null);
+  }, []);
 
 
   const handleLogout = useCallback(async () => {
@@ -194,7 +168,7 @@ const UserDashboard = ({ navigation }) => {
           size="medium"
           style={styles.callButton}
           disabled={startingCall}
-          onPress={() => handleStartCall(item._id, item.name)}
+          onPress={() => handleStartCall(item._id, item.name, item.specialization)}
         />
       </Card>
     ),
@@ -296,6 +270,17 @@ const UserDashboard = ({ navigation }) => {
         )}
       </View>
 
+      {/* Start Call Modal */}
+      <StartCallModal
+        visible={showStartCallModal}
+        therapistName={selectedTherapist?.name}
+        therapistSpecialization={selectedTherapist?.specialization}
+        coinCost={6}
+        userCoins={userProfile?.coins || 0}
+        isStarting={startingCall}
+        onConfirm={handleConfirmCall}
+        onCancel={handleCancelCall}
+      />
     </SafeAreaView>
   );
 };

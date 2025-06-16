@@ -8,6 +8,7 @@
 import io from 'socket.io-client';
 import { SOCKET_URL } from '../config/api';
 import AuthService from './AuthService';
+import { validateCallId, validateObjectKey } from '../utils/InputValidator';
 
 // Socket connection states
 export const SOCKET_STATES = {
@@ -34,6 +35,8 @@ export const SOCKET_EVENTS = {
   CALL_ACCEPTED: 'call-accepted',
   REJECT_CALL: 'reject-call',
   CALL_REJECTED: 'call-rejected',
+  CANCEL_CALL: 'cancel-call',
+  CALL_CANCELLED: 'call-cancelled',
   END_CALL: 'end-call',
   CALL_ENDED: 'call-ended',
   
@@ -54,6 +57,7 @@ class SocketService {
     this.listeners = new Map();
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
+    this.listenersSetup = false; // Track if listeners are already setup
     
     // Connection options
     this.connectionOptions = {
@@ -71,6 +75,47 @@ class SocketService {
     this.disconnect = this.disconnect.bind(this);
     this.emit = this.emit.bind(this);
     this.isConnected = this.isConnected.bind(this);
+  }
+
+  /**
+   * Validate incoming socket data
+   */
+  validateSocketData(data, requiredFields = []) {
+    if (!data || typeof data !== 'object') {
+      console.debug('SocketService: Validation failed - data is not an object:', typeof data);
+      return { isValid: false, error: 'Invalid data format' };
+    }
+
+    // Check for dangerous keys
+    for (const key in data) {
+      const keyValidation = validateObjectKey(key);
+      if (!keyValidation.isValid) {
+        console.debug('SocketService: Validation failed - dangerous key detected:', key);
+        return { isValid: false, error: `Invalid key: ${key}` };
+      }
+    }
+
+    // Check required fields
+    for (const field of requiredFields) {
+      if (!(field in data)) {
+        console.debug('SocketService: Validation failed - missing required field:', field, 'Available fields:', Object.keys(data));
+        return { isValid: false, error: `Missing required field: ${field}` };
+      }
+    }
+
+    // Validate callId if present (but don't require it unless explicitly in requiredFields)
+    if (data.callId) {
+      const callIdValidation = validateCallId(data.callId);
+      if (!callIdValidation.isValid) {
+        console.debug('SocketService: Validation failed - invalid callId format:', data.callId);
+        return { isValid: false, error: `Invalid callId: ${callIdValidation.error}` };
+      } else {
+        console.debug(`SocketService: CallId validated as ${callIdValidation.format} format:`, data.callId);
+      }
+    }
+
+    console.debug('SocketService: Validation passed for data:', Object.keys(data));
+    return { isValid: true };
   }
 
   /**
@@ -172,7 +217,9 @@ class SocketService {
    * Setup socket event listeners
    */
   setupSocketListeners() {
-    if (!this.socket) return;
+    if (!this.socket || this.listenersSetup) return;
+    
+    this.listenersSetup = true;
 
     // Connection events
     this.socket.on('connect', () => {
@@ -225,40 +272,121 @@ class SocketService {
       this.emitToListeners('error', { type: 'reconnect_failed', error: 'Failed to reconnect' });
     });
 
-    // Call signaling events - forward to listeners
+    // Call signaling events - forward to listeners with validation
     this.socket.on(SOCKET_EVENTS.CALL_REQUEST, (data) => {
       console.log('SocketService: Call request received:', data);
+      const validation = this.validateSocketData(data, ['callId']); // Only require callId
+      if (!validation.isValid) {
+        console.error('SocketService: Invalid call request data:', validation.error);
+        return;
+      }
+      
+      // Normalize field names - server might use different conventions
+      if (data.userName && !data.participantName) {
+        data.participantName = data.userName;
+        console.debug('SocketService: Normalized userName to participantName');
+      }
+      
+      if (data.userId && !data.participantId) {
+        data.participantId = data.userId;
+        console.debug('SocketService: Normalized userId to participantId');
+      }
+      
+      // Warn if no participant identifier is available
+      if (!data.participantName && !data.userName) {
+        console.warn('SocketService: Call request missing participant name information');
+      }
+      
       this.emitToListeners(SOCKET_EVENTS.CALL_REQUEST, data);
     });
 
     this.socket.on(SOCKET_EVENTS.CALL_ACCEPTED, (data) => {
       console.log('SocketService: Call accepted:', data);
+      const validation = this.validateSocketData(data, []); // callId is recommended but not required
+      if (!validation.isValid) {
+        console.error('SocketService: Invalid call accepted data:', validation.error);
+        return;
+      }
+      
+      // Warn about missing callId but don't block
+      if (!data.callId) {
+        console.warn('SocketService: Call accepted event missing callId - this may cause issues');
+      }
+      
       this.emitToListeners(SOCKET_EVENTS.CALL_ACCEPTED, data);
     });
 
     this.socket.on(SOCKET_EVENTS.CALL_REJECTED, (data) => {
       console.log('SocketService: Call rejected:', data);
+      const validation = this.validateSocketData(data, []); // callId is optional for rejected calls
+      if (!validation.isValid) {
+        console.error('SocketService: Invalid call rejected data:', validation.error);
+        return;
+      }
+      
+      // Warn about missing callId but don't block
+      if (!data.callId) {
+        console.warn('SocketService: Call rejected event missing callId - this may cause issues');
+      }
+      
       this.emitToListeners(SOCKET_EVENTS.CALL_REJECTED, data);
     });
 
     this.socket.on(SOCKET_EVENTS.CALL_ENDED, (data) => {
       console.log('SocketService: Call ended:', data);
+      const validation = this.validateSocketData(data, []); // callId is optional for ended calls
+      if (!validation.isValid) {
+        console.error('SocketService: Invalid call ended data:', validation.error);
+        return;
+      }
+      
+      // Warn about missing callId but don't block
+      if (!data.callId) {
+        console.warn('SocketService: Call ended event missing callId - this may cause issues');
+      }
+      
       this.emitToListeners(SOCKET_EVENTS.CALL_ENDED, data);
+    });
+
+    this.socket.on(SOCKET_EVENTS.CALL_CANCELLED, (data) => {
+      console.log('SocketService: Call cancelled:', data);
+      const validation = this.validateSocketData(data, []); // callId is optional for cancelled calls
+      if (!validation.isValid) {
+        console.error('SocketService: Invalid call cancelled data:', validation.error);
+        return;
+      }
+      
+      this.emitToListeners(SOCKET_EVENTS.CALL_CANCELLED, data);
     });
 
     // WebRTC signaling events
     this.socket.on(SOCKET_EVENTS.OFFER, (data) => {
       console.log('SocketService: Offer received');
+      const validation = this.validateSocketData(data, ['offer']);
+      if (!validation.isValid) {
+        console.error('SocketService: Invalid offer data:', validation.error);
+        return;
+      }
       this.emitToListeners(SOCKET_EVENTS.OFFER, data);
     });
 
     this.socket.on(SOCKET_EVENTS.ANSWER, (data) => {
       console.log('SocketService: Answer received');
+      const validation = this.validateSocketData(data, ['answer']);
+      if (!validation.isValid) {
+        console.error('SocketService: Invalid answer data:', validation.error);
+        return;
+      }
       this.emitToListeners(SOCKET_EVENTS.ANSWER, data);
     });
 
     this.socket.on(SOCKET_EVENTS.ICE_CANDIDATE, (data) => {
       console.log('SocketService: ICE candidate received');
+      const validation = this.validateSocketData(data, ['candidate']);
+      if (!validation.isValid) {
+        console.error('SocketService: Invalid ICE candidate data:', validation.error);
+        return;
+      }
       this.emitToListeners(SOCKET_EVENTS.ICE_CANDIDATE, data);
     });
 
@@ -283,12 +411,18 @@ class SocketService {
     console.log('SocketService: Disconnecting...');
     
     try {
-      // Remove all listeners
+      // Remove all socket listeners
       this.socket.removeAllListeners();
       
       // Disconnect
       this.socket.disconnect();
       this.socket = null;
+      
+      // Clear internal listeners to prevent memory leaks
+      this.listeners.clear();
+      
+      // Reset listeners setup flag
+      this.listenersSetup = false;
       
       // Update state
       this.connectionState = SOCKET_STATES.DISCONNECTED;

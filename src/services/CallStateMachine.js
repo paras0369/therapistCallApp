@@ -39,6 +39,7 @@ export const CALL_EVENTS = {
   CALL_REQUEST_RECEIVED: 'CALL_REQUEST_RECEIVED',
   CALL_ACCEPTED: 'CALL_ACCEPTED',
   CALL_REJECTED: 'CALL_REJECTED',
+  CALL_CANCELLED: 'CALL_CANCELLED',
   CALL_ENDED: 'CALL_ENDED',
 
   // WebRTC events
@@ -59,10 +60,6 @@ export const CALL_EVENTS = {
 
 // Valid state transitions - prevents invalid state changes
 const STATE_TRANSITIONS = {
-  [CALL_STATES.IDLE]: {
-    [CALL_EVENTS.START_CALL]: CALL_STATES.INITIATING,
-    [CALL_EVENTS.CALL_REQUEST_RECEIVED]: CALL_STATES.RINGING,
-  },
 
   [CALL_STATES.INITIATING]: {
     [CALL_EVENTS.MEDIA_ACQUIRED]: CALL_STATES.CALLING,
@@ -83,6 +80,7 @@ const STATE_TRANSITIONS = {
   [CALL_STATES.RINGING]: {
     [CALL_EVENTS.ACCEPT_CALL]: CALL_STATES.CONNECTING,
     [CALL_EVENTS.REJECT_CALL]: CALL_STATES.REJECTED,
+    [CALL_EVENTS.CALL_CANCELLED]: CALL_STATES.ENDED,
     [CALL_EVENTS.CALL_ENDED]: CALL_STATES.ENDED,
     [CALL_EVENTS.TIMEOUT]: CALL_STATES.FAILED,
     [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
@@ -95,6 +93,7 @@ const STATE_TRANSITIONS = {
     [CALL_EVENTS.TIMEOUT]: CALL_STATES.FAILED,
     [CALL_EVENTS.END_CALL]: CALL_STATES.DISCONNECTING,
     [CALL_EVENTS.CALL_ENDED]: CALL_STATES.ENDED,
+    [CALL_EVENTS.CALL_ACCEPTED]: CALL_STATES.CONNECTING, // Idempotent - stay in connecting
     [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
   },
 
@@ -121,6 +120,17 @@ const STATE_TRANSITIONS = {
   },
   [CALL_STATES.REJECTED]: {
     [CALL_EVENTS.RESET]: CALL_STATES.IDLE,
+  },
+  
+  // Handle stale events when already in IDLE
+  [CALL_STATES.IDLE]: {
+    [CALL_EVENTS.START_CALL]: CALL_STATES.INITIATING,
+    [CALL_EVENTS.CALL_REQUEST_RECEIVED]: CALL_STATES.RINGING,
+    // Gracefully ignore stale events from previous calls
+    [CALL_EVENTS.CALL_ACCEPTED]: CALL_STATES.IDLE, // Idempotent - stay idle
+    [CALL_EVENTS.CALL_ENDED]: CALL_STATES.IDLE, // Idempotent - stay idle
+    [CALL_EVENTS.CALL_CANCELLED]: CALL_STATES.IDLE, // Idempotent - stay idle
+    [CALL_EVENTS.CALL_REJECTED]: CALL_STATES.IDLE, // Idempotent - stay idle
   },
 };
 
@@ -151,6 +161,7 @@ const EVENT_PRIORITY = {
   [CALL_EVENTS.MEDIA_FAILED]: 80,
   [CALL_EVENTS.TIMEOUT]: 75,
   [CALL_EVENTS.CALL_REJECTED]: 70,
+  [CALL_EVENTS.CALL_CANCELLED]: 70,
   [CALL_EVENTS.REJECT_CALL]: 65,
   [CALL_EVENTS.WEBRTC_CONNECTED]: 60,
   [CALL_EVENTS.WEBRTC_DISCONNECTED]: 55,
@@ -171,9 +182,15 @@ class CallStateMachine {
     this.isProcessing = false;
     this.autoResetTimer = null;
     this.stateHistory = [];
-    this.maxHistorySize = 50;
+    this.maxHistorySize = 20; // Reduced from 50 to save memory
     this.eventDedupeWindow = 500; // ms
     this.recentEvents = new Map();
+    this.maxEventQueueSize = 50; // Prevent unbounded queue growth
+    
+    // Periodic cleanup for memory management
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupRecentEvents();
+    }, 10000); // Cleanup every 10 seconds
 
     // Call metadata
     this.callId = null;
@@ -284,9 +301,10 @@ class CallStateMachine {
       metadata,
     });
 
-    // Keep history size manageable
+    // Keep history size manageable - remove multiple old entries at once for efficiency
     if (this.stateHistory.length > this.maxHistorySize) {
-      this.stateHistory.shift();
+      const excessCount = this.stateHistory.length - this.maxHistorySize;
+      this.stateHistory.splice(0, excessCount);
     }
 
     // Update current state
@@ -386,7 +404,25 @@ class CallStateMachine {
     return new Promise(resolve => {
       const priority = EVENT_PRIORITY[event] || 0;
 
-      // Insert event in queue based on priority
+      // Check queue size to prevent unbounded growth
+      if (this.eventQueue.length >= this.maxEventQueueSize) {
+        console.warn('CallStateMachine: Event queue full, dropping lowest priority event');
+        // Find and remove the lowest priority event
+        let lowestPriorityIndex = 0;
+        let lowestPriority = this.eventQueue[0].priority;
+        
+        for (let i = 1; i < this.eventQueue.length; i++) {
+          if (this.eventQueue[i].priority < lowestPriority) {
+            lowestPriority = this.eventQueue[i].priority;
+            lowestPriorityIndex = i;
+          }
+        }
+        
+        const droppedEvent = this.eventQueue.splice(lowestPriorityIndex, 1)[0];
+        droppedEvent.resolve({ success: false, error: 'Event queue full' });
+      }
+
+      // Insert event in queue based on priority using binary search for efficiency
       const eventItem = {
         event,
         metadata,
@@ -395,18 +431,20 @@ class CallStateMachine {
         timestamp: Date.now(),
       };
 
-      let inserted = false;
-      for (let i = 0; i < this.eventQueue.length; i++) {
-        if (eventItem.priority > this.eventQueue[i].priority) {
-          this.eventQueue.splice(i, 0, eventItem);
-          inserted = true;
-          break;
+      // Binary search to find insertion point
+      let left = 0;
+      let right = this.eventQueue.length;
+      
+      while (left < right) {
+        const mid = Math.floor((left + right) / 2);
+        if (this.eventQueue[mid].priority >= eventItem.priority) {
+          left = mid + 1;
+        } else {
+          right = mid;
         }
       }
-
-      if (!inserted) {
-        this.eventQueue.push(eventItem);
-      }
+      
+      this.eventQueue.splice(left, 0, eventItem);
 
       this.processEventQueue();
     });
@@ -546,6 +584,12 @@ class CallStateMachine {
       clearTimeout(this.autoResetTimer);
       this.autoResetTimer = null;
     }
+    
+    // Clear cleanup interval
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
 
     // Clear event queue
     this.eventQueue.forEach(item => {
@@ -616,6 +660,28 @@ class CallStateMachine {
    */
   getStateHistory() {
     return [...this.stateHistory];
+  }
+
+  /**
+   * Cleanup expired events from recent events map
+   */
+  cleanupRecentEvents() {
+    const now = Date.now();
+    const expiredKeys = [];
+    
+    for (const [key, timestamp] of this.recentEvents.entries()) {
+      if (now - timestamp > this.eventDedupeWindow) {
+        expiredKeys.push(key);
+      }
+    }
+    
+    for (const key of expiredKeys) {
+      this.recentEvents.delete(key);
+    }
+    
+    if (expiredKeys.length > 0) {
+      console.log(`CallStateMachine: Cleaned up ${expiredKeys.length} expired events from dedupe map`);
+    }
   }
 
   /**

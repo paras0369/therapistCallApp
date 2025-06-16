@@ -1,4 +1,6 @@
-const API_BASE_URL = 'http://192.168.29.45:3000/api';
+import Environment from './environment';
+
+const API_BASE_URL = Environment.API_BASE_URL;
 
 export const API_ENDPOINTS = {
   SEND_OTP: `${API_BASE_URL}/auth/send-otp`,
@@ -13,4 +15,4 @@ export const API_ENDPOINTS = {
   END_CALL: `${API_BASE_URL}/calls/end`,
 };
 
-export const SOCKET_URL = 'http://192.168.29.45:3000';
+export const SOCKET_URL = Environment.SOCKET_URL;

@@ -13,7 +13,7 @@ import axios from 'axios';
 
 // New imports
 import { useAuth, useCall } from '../context';
-import { Button, Card, Avatar, LoadingState, ErrorBoundary } from './common';
+import { Button, Card, Avatar, LoadingState, ErrorBoundary, IncomingCallModal } from './common';
 import theme from '../theme';
 
 // Existing imports
@@ -36,32 +36,82 @@ const TherapistDashboard = ({ navigation }) => {
     loadData();
   }, []);
 
+  // Track modal visibility separately from incomingCall state
+  const [showIncomingCallModal, setShowIncomingCallModal] = useState(false);
+  const [modalCallData, setModalCallData] = useState(null);
+  const [callBeingHandled, setCallBeingHandled] = useState(false);
+
   // Handle incoming calls
   useEffect(() => {
-    if (incomingCall) {
-      Alert.alert(
-        'Incoming Call',
-        `Call from ${incomingCall.participantName}`,
-        [
-          { text: 'Decline', onPress: () => handleRejectCall(incomingCall.callId) },
-          { text: 'Accept', onPress: () => handleAcceptCall(incomingCall.callId) },
-        ]
-      );
+    if (incomingCall && !showIncomingCallModal && !callBeingHandled) {
+      console.log('TherapistDashboard: Showing incoming call modal for:', incomingCall.participantName);
+      setModalCallData(incomingCall);
+      setShowIncomingCallModal(true);
+    } else if (!incomingCall && showIncomingCallModal) {
+      console.log('TherapistDashboard: Incoming call cleared, hiding modal');
+      setShowIncomingCallModal(false);
+      setModalCallData(null);
+      setCallBeingHandled(false);
     }
-  }, [incomingCall]);
+  }, [incomingCall, showIncomingCallModal, callBeingHandled]);
 
   const handleAcceptCall = useCallback(async (callId) => {
-    const result = await acceptCall(callId);
-    if (result.success) {
-      navigation.navigate('CallScreen');
-    } else {
-      Alert.alert('Error', result.error || 'Failed to accept call');
+    console.log(`TherapistDashboard: Accepting call ${callId}`);
+    
+    // Mark call as being handled to prevent re-showing modal
+    setCallBeingHandled(true);
+    setShowIncomingCallModal(false);
+    
+    // Validate that we have a valid incoming call before accepting
+    if (!modalCallData || !modalCallData.callId || modalCallData.callId !== callId) {
+      console.error(`TherapistDashboard: No valid incoming call to accept. Expected: ${callId}, Found:`, modalCallData);
+      Alert.alert('Error', 'No valid incoming call to accept. The call may have ended.');
+      setCallBeingHandled(false);
+      return;
     }
-  }, [acceptCall, navigation]);
+    
+    // Validate that incoming call has required participant information
+    if (!modalCallData.participantName && !modalCallData.participantId) {
+      console.error(`TherapistDashboard: Incoming call missing participant information:`, modalCallData);
+      Alert.alert('Error', 'Cannot accept call - missing caller information.');
+      setCallBeingHandled(false);
+      return;
+    }
+    
+    try {
+      const result = await acceptCall(callId);
+      console.log(`TherapistDashboard: Accept call result:`, result);
+      
+      if (result.success) {
+        console.log(`TherapistDashboard: Navigating to CallScreen`);
+        navigation.navigate('CallScreen');
+      } else {
+        console.error(`TherapistDashboard: Accept call failed:`, result.error);
+        Alert.alert('Error', result.error || 'Failed to accept call');
+        setCallBeingHandled(false);
+      }
+    } catch (error) {
+      console.error(`TherapistDashboard: Accept call exception:`, error);
+      Alert.alert('Error', error.message || 'Failed to accept call');
+      setCallBeingHandled(false);
+    }
+  }, [acceptCall, navigation, modalCallData]);
 
   const handleRejectCall = useCallback((callId) => {
+    console.log(`TherapistDashboard: Rejecting call ${callId}`);
+    
+    // Mark call as being handled and hide modal
+    setCallBeingHandled(true);
+    setShowIncomingCallModal(false);
+    
     rejectCall(callId);
   }, [rejectCall]);
+
+  const handleDismissModal = useCallback(() => {
+    console.log('TherapistDashboard: Modal dismissed by user');
+    setCallBeingHandled(true);
+    setShowIncomingCallModal(false);
+  }, []);
 
   const loadData = useCallback(async () => {
     try {
@@ -176,6 +226,16 @@ const TherapistDashboard = ({ navigation }) => {
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* Incoming Call Modal */}
+      <IncomingCallModal
+        visible={showIncomingCallModal}
+        callerName={modalCallData?.participantName || 'Unknown Caller'}
+        callerInfo={modalCallData?.participantId}
+        onAccept={() => handleAcceptCall(modalCallData?.callId)}
+        onDecline={() => handleRejectCall(modalCallData?.callId)}
+        onDismiss={handleDismissModal}
+      />
+      
       <View style={styles.header}>
         <View style={styles.headerTop}>
           <View style={styles.therapistInfo}>

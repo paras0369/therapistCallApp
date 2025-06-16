@@ -260,6 +260,13 @@ export const CallProvider = ({ children }) => {
         type: CALL_ACTIONS.SET_MANAGER_STATE,
         payload: event,
       });
+      
+      // Clear incoming call when transitioning to terminal states
+      if (['ended', 'failed', 'rejected', 'idle'].includes(event.newState)) {
+        console.log('CallContextV2: Clearing incoming call due to state change to', event.newState);
+        dispatch({ type: CALL_ACTIONS.CLEAR_INCOMING_CALL });
+      }
+      
       updateConnectionStatus();
     });
 

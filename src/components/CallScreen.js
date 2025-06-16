@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -12,6 +12,7 @@ import {
 import { Button, Avatar, LoadingSpinner } from './common';
 import { useCall, useCallState, useAuth, CALL_STATES } from '../context';
 import theme from '../theme';
+import { sanitizeForDisplay } from '../utils/InputValidator';
 
 // Safely import InCallManager with fallback
 let InCallManager = null;
@@ -44,7 +45,7 @@ const CallScreen = ({ navigation }) => {
   const appStateRef = useRef(AppState.currentState);
   const audioManagerInitializedRef = useRef(false);
 
-  // Reset states when component mounts
+  // Reset states when component mounts (optimized to avoid unnecessary re-renders)
   useEffect(() => {
     console.log('CallScreen mounted with state:', callState);
     setCallDuration(0);
@@ -57,7 +58,7 @@ const CallScreen = ({ navigation }) => {
       cleanupTimers();
       cleanupAudio();
     };
-  }, []);
+  }, [cleanupTimers, cleanupAudio]); // Added dependencies for completeness
 
   // Handle app state changes
   useEffect(() => {
@@ -88,19 +89,20 @@ const CallScreen = ({ navigation }) => {
     [isInCall],
   );
 
-  // Cleanup all timers
+  // Cleanup all timers with proper ordering
   const cleanupTimers = useCallback(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
+    // Clear timers in reverse order of creation to prevent race conditions
+    if (errorTimeoutRef.current) {
+      clearTimeout(errorTimeoutRef.current);
+      errorTimeoutRef.current = null;
     }
     if (navigationTimeoutRef.current) {
       clearTimeout(navigationTimeoutRef.current);
       navigationTimeoutRef.current = null;
     }
-    if (errorTimeoutRef.current) {
-      clearTimeout(errorTimeoutRef.current);
-      errorTimeoutRef.current = null;
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
     }
   }, []);
 
@@ -117,23 +119,32 @@ const CallScreen = ({ navigation }) => {
     }
   }, []);
 
-  // Get call participant info
-  const getParticipantInfo = useCallback(() => {
+  // Get call participant info (memoized for performance)
+  const participant = useMemo(() => {
     if (userType === 'therapist') {
+      const rawName = incomingCall?.participantName || callData?.participantName || 'User';
       return {
-        name:
-          incomingCall?.participantName || callData?.participantName || 'User',
+        name: sanitizeForDisplay(rawName),
         emoji: '👤',
       };
     } else {
+      const rawName = callData?.participantName || 'Therapist';
       return {
-        name: callData?.participantName || 'Therapist',
+        name: sanitizeForDisplay(rawName),
         emoji: '👨‍⚕️',
       };
     }
-  }, [userType, incomingCall, callData]);
+  }, [userType, incomingCall?.participantName, callData?.participantName]);
 
-  const participant = getParticipantInfo();
+  // Define handleEndCall before it's used in dependency arrays
+  const handleEndCall = useCallback(async () => {
+    try {
+      console.log('CallScreen: Ending call');
+      await endCall();
+    } catch (error) {
+      console.error('CallScreen: Error ending call:', error);
+    }
+  }, [endCall]);
 
   // Handle back button
   useEffect(() => {
@@ -242,11 +253,17 @@ const CallScreen = ({ navigation }) => {
       userType === 'therapist' ? 'TherapistDashboard' : 'UserDashboard';
     console.log('CallScreen: Navigating to', targetScreen);
 
-    // Use reset to prevent navigation stack issues
-    navigation.reset({
-      index: 0,
-      routes: [{ name: targetScreen }],
-    });
+    try {
+      // Use reset to prevent navigation stack issues
+      navigation.reset({
+        index: 0,
+        routes: [{ name: targetScreen }],
+      });
+    } catch (error) {
+      console.error('CallScreen: Navigation error:', error);
+      // Reset navigation flag on error
+      isNavigatingRef.current = false;
+    }
   }, [navigation, userType, cleanupTimers, cleanupAudio]);
 
   // Handle navigation based on call state
@@ -269,6 +286,7 @@ const CallScreen = ({ navigation }) => {
           callState,
         );
         navigateBack();
+        navigationTimeoutRef.current = null; // Clear ref after navigation
       }, 1500);
     } else if (callState === CALL_STATES.IDLE && !isNavigatingRef.current) {
       // For IDLE state, navigate back immediately
@@ -298,6 +316,7 @@ const CallScreen = ({ navigation }) => {
       errorTimeoutRef.current = setTimeout(() => {
         setShowError(false);
         clearError();
+        errorTimeoutRef.current = null; // Clear ref after timeout
       }, 5000);
     }
 
@@ -308,15 +327,6 @@ const CallScreen = ({ navigation }) => {
       }
     };
   }, [error, clearError]);
-
-  const handleEndCall = useCallback(async () => {
-    try {
-      console.log('CallScreen: Ending call');
-      await endCall();
-    } catch (error) {
-      console.error('CallScreen: Error ending call:', error);
-    }
-  }, [endCall]);
 
   const handleToggleMute = useCallback(() => {
     if (InCallManager && isInCall) {
@@ -366,8 +376,8 @@ const CallScreen = ({ navigation }) => {
       .padStart(2, '0')}`;
   }, []);
 
-  // Get call status info
-  const getCallStatusInfo = () => {
+  // Get call status info (memoized for performance)
+  const statusInfo = useMemo(() => {
     switch (callState) {
       case CALL_STATES.IDLE:
         return { text: 'Preparing...', color: theme.colors.textSecondary };
@@ -392,11 +402,10 @@ const CallScreen = ({ navigation }) => {
       default:
         return { text: 'Preparing...', color: theme.colors.textSecondary };
     }
-  };
+  }, [callState]);
 
-  const statusInfo = getCallStatusInfo();
-  const isCallActive = callState === CALL_STATES.CONNECTED;
-  const canControl = callState === CALL_STATES.CONNECTED;
+  const isCallActive = useMemo(() => callState === CALL_STATES.CONNECTED, [callState]);
+  const canControl = useMemo(() => callState === CALL_STATES.CONNECTED, [callState]);
 
   return (
     <SafeAreaView style={styles.container}>

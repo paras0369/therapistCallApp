@@ -10,6 +10,7 @@ import CallStateMachine, { CALL_STATES, CALL_EVENTS } from './CallStateMachine';
 import WebRTCService, { WEBRTC_EVENTS } from './WebRTCService';
 import SocketService, { SOCKET_EVENTS } from './SocketService';
 import AuthService from './AuthService';
+import { NetworkRetryManager, WebRTCRetryManager, CallRetryManager } from '../utils/RetryManager';
 
 // Call Manager Events
 export const CALL_MANAGER_EVENTS = {
@@ -46,6 +47,7 @@ class CallManager {
     this.currentOperation = null;
     this.operationTimeout = null;
     this.webrtcInitTimeout = null;
+    this.webrtcInitMutex = false; // Mutex for WebRTC initialization
     this.listeners = new Map();
 
     // Operation timeouts (in milliseconds)
@@ -83,13 +85,19 @@ class CallManager {
       // Set operation timeout
       this.setOperationTimeout('initialization', this.timeouts.initialization);
 
-      // Initialize services in order
-      const socketResult = await this.socketService.connect();
+      // Initialize services in order with retry logic
+      const socketResult = await NetworkRetryManager.execute(
+        () => this.socketService.connect(),
+        'socket connection'
+      );
       if (!socketResult.success) {
         throw new Error(`Socket connection failed: ${socketResult.error}`);
       }
 
-      const webrtcResult = await this.webrtcService.initialize();
+      const webrtcResult = await WebRTCRetryManager.execute(
+        () => this.webrtcService.initialize(),
+        'WebRTC initialization'
+      );
       if (!webrtcResult.success) {
         throw new Error(`WebRTC initialization failed: ${webrtcResult.error}`);
       }
@@ -163,6 +171,10 @@ class CallManager {
 
     this.socketService.on(SOCKET_EVENTS.CALL_ENDED, data => {
       this.handleCallEnded(data);
+    });
+
+    this.socketService.on(SOCKET_EVENTS.CALL_CANCELLED, data => {
+      this.handleCallCancelled(data);
     });
 
     this.socketService.on(SOCKET_EVENTS.OFFER, data => {
@@ -279,7 +291,10 @@ class CallManager {
       const tempCallId = `temp_${Date.now()}_${therapistId}`;
       this.stateMachine.setCallData({ callId: tempCallId });
 
-      console.log('CallManager: Call initiation sent with temp callId:', tempCallId);
+      console.log(
+        'CallManager: Call initiation sent with temp callId:',
+        tempCallId,
+      );
       return { success: true };
     } catch (error) {
       console.error('CallManager: Start call failed:', error);
@@ -302,9 +317,25 @@ class CallManager {
   async acceptCall(callId) {
     try {
       console.log(`CallManager: Accepting call ${callId}`);
+      console.log(`CallManager: Current state: ${this.stateMachine.getState()}`);
 
       if (!this.isInitialized) {
         throw new Error('CallManager not initialized');
+      }
+
+      // Validate that we're in ringing state and have valid call data
+      const currentState = this.stateMachine.getState();
+      if (currentState !== CALL_STATES.RINGING) {
+        throw new Error(`Cannot accept call - not in ringing state. Current state: ${currentState}`);
+      }
+
+      const callData = this.stateMachine.getCallData();
+      if (!callData.callId) {
+        throw new Error('Cannot accept call - no valid call to accept');
+      }
+
+      if (callData.callId !== callId) {
+        throw new Error(`Cannot accept call - callId mismatch. Expected: ${callData.callId}, Received: ${callId}`);
       }
 
       // Set operation timeout
@@ -312,6 +343,7 @@ class CallManager {
       this.currentOperation = 'accepting_call';
 
       // Accept the call in state machine
+      console.log(`CallManager: Handling ACCEPT_CALL event for ${callId}`);
       const result = await this.stateMachine.handleEvent(
         CALL_EVENTS.ACCEPT_CALL,
         {
@@ -319,9 +351,13 @@ class CallManager {
         },
       );
 
+      console.log(`CallManager: ACCEPT_CALL result:`, result);
       if (!result.success) {
+        console.error(`CallManager: ACCEPT_CALL failed:`, result.error);
         throw new Error(result.error);
       }
+
+      console.log(`CallManager: State after acceptance: ${this.stateMachine.getState()}`);
 
       // Ensure WebRTC is properly initialized before getting media
       const webrtcStatus = this.webrtcService.getStatus();
@@ -350,15 +386,19 @@ class CallManager {
       }
 
       // Send acceptance to server
+      console.log(`CallManager: Sending acceptance to server for ${callId}`);
       const acceptResult = this.socketService.acceptCall(callId);
+      console.log(`CallManager: Server acceptance result:`, acceptResult);
+      
       if (!acceptResult.success) {
+        console.error(`CallManager: Server acceptance failed:`, acceptResult.error);
         await this.stateMachine.handleEvent(CALL_EVENTS.CONNECTION_FAILED, {
           error: acceptResult.error,
         });
         throw new Error(acceptResult.error);
       }
 
-      console.log('CallManager: Call acceptance sent');
+      console.log('CallManager: Call acceptance sent successfully');
       return { success: true };
     } catch (error) {
       console.error('CallManager: Accept call failed:', error);
@@ -409,7 +449,10 @@ class CallManager {
   async endCall() {
     try {
       const callData = this.stateMachine.getCallData();
-      console.log(`CallManager: Ending call ${callData.callId} in state ${this.stateMachine.getState()}`);
+      const currentState = this.stateMachine.getState();
+      console.log(
+        `CallManager: Ending call ${callData.callId} in state ${currentState}`,
+      );
 
       // Clear any operation timeout since we're ending the call
       this.clearOperationTimeout();
@@ -422,15 +465,46 @@ class CallManager {
 
       // IMPORTANT: Send end to server FIRST before updating state machine
       // This ensures other participants (like therapist) are notified immediately
-      if (callData.callId) {
-        console.log('CallManager: Notifying server of call end before state change');
+      if (callData.callId && !callData.callId.startsWith('temp_')) {
+        // Real callId - send normal end call
+        console.log(
+          'CallManager: Notifying server of call end before state change',
+        );
         const endResult = this.socketService.endCall(callData.callId, duration);
         if (!endResult.success) {
-          console.warn('CallManager: Failed to notify server of call end:', endResult.error);
+          console.warn(
+            'CallManager: Failed to notify server of call end:',
+            endResult.error,
+          );
           // Continue anyway since we still want to clean up locally
         }
+      } else if (currentState === CALL_STATES.CALLING) {
+        // Special case: User ended call while waiting for therapist to accept
+        // This includes calls with temp callId (not yet accepted by server)
+        console.log(
+          'CallManager: Ending call in CALLING state - sending cancellation to server',
+        );
+        if (callData.participantId) {
+          // Since this is a call that was never properly established (still has temp callId),
+          // we need to send a cancellation to the server. The server should match this with 
+          // the therapist ID to cancel the incoming call request.
+          const cancelResult = this.socketService.emit('cancel-call-request', {
+            therapistId: callData.participantId,
+            reason: 'caller_ended',
+            timestamp: Date.now(),
+          });
+          if (!cancelResult.success) {
+            console.warn('CallManager: Failed to send call cancellation:', cancelResult.error);
+          } else {
+            console.log('CallManager: Call cancellation sent successfully to therapist:', callData.participantId);
+          }
+        } else {
+          console.warn('CallManager: Cannot send cancellation - no participantId available');
+        }
       } else {
-        console.log('CallManager: No callId available, skipping server notification');
+        console.log(
+          'CallManager: No valid callId available, skipping server notification',
+        );
       }
 
       // End in state machine AFTER notifying server
@@ -558,7 +632,10 @@ class CallManager {
       // Update the callId with the real server-provided one (replacing temporary ID)
       if (data.callId) {
         this.stateMachine.setCallData({ callId: data.callId });
-        console.log('CallManager: Updated callId from temp to server ID:', data.callId);
+        console.log(
+          'CallManager: Updated callId from temp to server ID:',
+          data.callId,
+        );
       }
 
       await this.stateMachine.handleEvent(CALL_EVENTS.CALL_ACCEPTED, {
@@ -574,20 +651,26 @@ class CallManager {
       if (
         userType === 'user' &&
         webrtcStatus.connectionState !== 'connecting' &&
-        webrtcStatus.connectionState !== 'connected'
+        webrtcStatus.connectionState !== 'connected' &&
+        !this.webrtcInitMutex // Check mutex to prevent race conditions
       ) {
         console.log(
           'CallManager: User side - initiating WebRTC connection for call',
           data.callId,
         );
+        // Set mutex to prevent multiple initialization attempts
+        this.webrtcInitMutex = true;
         // Small delay to ensure both sides are ready
         this.webrtcInitTimeout = setTimeout(() => {
           this.webrtcInitTimeout = null;
-          this.initiateWebRTCConnection();
+          // Start WebRTC connection initiation
+          this.initiateWebRTCConnectionInternal().finally(() => {
+            this.webrtcInitMutex = false; // Release mutex when done
+          });
         }, 100);
       } else {
         console.log(
-          'CallManager: Therapist side or WebRTC already active - waiting for offer',
+          'CallManager: Therapist side, WebRTC already active, or initialization in progress - waiting for offer',
         );
       }
     } catch (error) {
@@ -616,6 +699,12 @@ class CallManager {
   async handleCallEnded(data) {
     console.log('CallManager: Call ended:', data);
 
+    // If we're in ringing state and call ended, it means the caller hung up before we answered
+    const currentState = this.stateMachine.getState();
+    if (currentState === CALL_STATES.RINGING) {
+      console.log('CallManager: Call ended while ringing - caller hung up before pickup');
+    }
+
     await this.stateMachine.handleEvent(CALL_EVENTS.CALL_ENDED, {
       callId: data.callId,
       reason: data.reason,
@@ -624,9 +713,28 @@ class CallManager {
   }
 
   /**
-   * Initiate WebRTC connection
+   * Handle call cancelled
    */
-  async initiateWebRTCConnection() {
+  async handleCallCancelled(data) {
+    console.log('CallManager: Call cancelled:', data);
+
+    // Call was cancelled by the caller before therapist could accept
+    const currentState = this.stateMachine.getState();
+    if (currentState === CALL_STATES.RINGING) {
+      console.log('CallManager: Incoming call was cancelled - clearing call state');
+    }
+
+    await this.stateMachine.handleEvent(CALL_EVENTS.CALL_CANCELLED, {
+      callId: data.callId,
+      reason: data.reason || 'cancelled_by_caller',
+      endedBy: 'caller',
+    });
+  }
+
+  /**
+   * Initiate WebRTC connection (internal method without mutex check)
+   */
+  async initiateWebRTCConnectionInternal() {
     try {
       console.log('CallManager: Initiating WebRTC connection...');
 
@@ -670,19 +778,40 @@ class CallManager {
       }
 
       // Create and send offer
+      console.log('CallManager: Creating WebRTC offer...');
       const offerResult = await this.webrtcService.createOffer();
       if (!offerResult.success) {
         throw new Error(offerResult.error);
       }
 
+      console.log('CallManager: Sending offer to remote peer...');
       const callData = this.stateMachine.getCallData();
-      this.socketService.sendOffer(callData.callId, offerResult.offer);
+      const sendResult = this.socketService.sendOffer(callData.callId, offerResult.offer);
+      if (!sendResult.success) {
+        throw new Error(sendResult.error);
+      }
+
+      console.log('CallManager: WebRTC offer sent successfully');
     } catch (error) {
-      console.error('CallManager: WebRTC connection failed:', error);
+      console.error('CallManager: WebRTC initiation failed:', error);
       await this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_FAILED, {
         error: error.message,
       });
     }
+  }
+
+  /**
+   * Initiate WebRTC connection (public method with mutex check)
+   */
+  async initiateWebRTCConnection() {
+    // Double-check mutex to prevent concurrent calls
+    if (this.webrtcInitMutex) {
+      console.log('CallManager: WebRTC initialization already in progress, skipping');
+      return;
+    }
+
+    // Call the internal method which has the actual logic
+    return this.initiateWebRTCConnectionInternal();
   }
 
   /**
@@ -776,7 +905,7 @@ class CallManager {
   /**
    * Handle remote stream
    */
-  handleRemoteStream(stream) {
+  handleRemoteStream() {
     try {
       console.log('CallManager: Remote stream received');
       this.stateMachine.handleEvent(CALL_EVENTS.WEBRTC_CONNECTED);
@@ -831,7 +960,10 @@ class CallManager {
         });
       }
     } catch (error) {
-      console.error('CallManager: Error handling WebRTC ICE state change:', error);
+      console.error(
+        'CallManager: Error handling WebRTC ICE state change:',
+        error,
+      );
       this.emit(CALL_MANAGER_EVENTS.ERROR, {
         type: ERROR_TYPES.CONNECTION_FAILED,
         message: `Failed to handle WebRTC ICE state change: ${error.message}`,
@@ -989,13 +1121,18 @@ class CallManager {
     this.currentOperation = null;
 
     try {
-      // Clean up services in parallel for faster cleanup
-      await Promise.all([
-        this.webrtcService.cleanup(),
-        this.socketService.disconnect(),
-      ]);
+      // Clean up services sequentially to prevent race conditions
+      // WebRTC first to stop media streams, then socket to close connections
+      console.log('CallManager: Cleaning up WebRTC service...');
+      await this.webrtcService.cleanup();
+      
+      console.log('CallManager: Disconnecting socket service...');
+      await this.socketService.disconnect();
+      
+      console.log('CallManager: Services cleanup complete');
     } catch (error) {
       console.error('CallManager: Error during service cleanup:', error);
+      // Continue with state machine reset even if service cleanup fails
     }
 
     // Reset state machine
@@ -1007,6 +1144,7 @@ class CallManager {
 
     // Reset initialization state
     this.isInitialized = false;
+    this.webrtcInitMutex = false; // Reset mutex
 
     // Clear all event listeners
     this.listeners.clear();
